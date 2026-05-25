@@ -4,6 +4,8 @@ import datetime
 import threading
 import time
 from flask import Flask
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 app = Flask(__name__)
 
@@ -18,19 +20,18 @@ MAX_SIGNALS_PER_DAY = 3
 signals_today = 0
 last_signal_date = None
 last_signal_time = None
-
 last_signal = "No signals yet."
+
 wins = 0
 losses = 0
+
 
 def tg(msg):
     requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        json={
-            "chat_id": CHAT_ID,
-            "text": msg
-        }
+        json={"chat_id": CHAT_ID, "text": msg}
     )
+
 
 def get_data(interval):
     r = requests.get(
@@ -45,8 +46,10 @@ def get_data(interval):
 
     return list(reversed(r.get("values", [])))
 
+
 def closes(data):
     return [float(x["close"]) for x in data]
+
 
 def ema(prices, period):
     k = 2 / (period + 1)
@@ -57,13 +60,13 @@ def ema(prices, period):
 
     return e
 
+
 def rsi(prices, period=14):
     gains = []
     losses_local = []
 
     for i in range(1, len(prices)):
         diff = prices[i] - prices[i - 1]
-
         gains.append(max(diff, 0))
         losses_local.append(abs(min(diff, 0)))
 
@@ -76,10 +79,10 @@ def rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+
 def trend(prices):
     e20 = ema(prices[-60:], 20)
     e50 = ema(prices[-80:], 50)
-
     price = prices[-1]
 
     if price > e20 > e50:
@@ -90,15 +93,14 @@ def trend(prices):
 
     return "neutral"
 
+
 def in_session():
     hour = datetime.datetime.utcnow().hour
     return 7 <= hour <= 20
 
+
 def analyze(force=False):
-    global signals_today
-    global last_signal_date
-    global last_signal_time
-    global last_signal
+    global signals_today, last_signal_date, last_signal_time, last_signal
 
     today = datetime.date.today()
 
@@ -122,7 +124,7 @@ def analyze(force=False):
 
     if not m1 or not m5 or not m15:
         if force:
-            tg("⚠️ Data error.")
+            tg("⚠️ Data error. No market data received.")
         return
 
     p1 = closes(m1)
@@ -140,7 +142,6 @@ def analyze(force=False):
 
     recent_high = max(p1[-30:])
     recent_low = min(p1[-30:])
-
     range_size = recent_high - recent_low
 
     buy_score = 0
@@ -148,19 +149,15 @@ def analyze(force=False):
 
     if t15 == "bullish":
         buy_score += 25
-
     if t5 == "bullish":
         buy_score += 25
-
     if t1 == "bullish":
         buy_score += 15
 
     if t15 == "bearish":
         sell_score += 25
-
     if t5 == "bearish":
         sell_score += 25
-
     if t1 == "bearish":
         sell_score += 15
 
@@ -185,7 +182,6 @@ def analyze(force=False):
 
     if buy_score >= 70 and buy_score > sell_score:
         direction = "BUY"
-
     elif sell_score >= 70 and sell_score > buy_score:
         direction = "SELL"
 
@@ -203,8 +199,8 @@ M1: {t1}
 M5: {t5}
 M15: {t15}
 
-RSI M1: {round(rsi1,1)}
-RSI M5: {round(rsi5,1)}
+RSI M1: {round(rsi1, 1)}
+RSI M5: {round(rsi5, 1)}
 
 Reason: No high probability setup.
 """)
@@ -218,7 +214,6 @@ Reason: No high probability setup.
         return
 
     risk_amount = ACCOUNT * (RISK_PERCENT / 100)
-
     lot = 0.01
 
     if direction == "BUY":
@@ -226,7 +221,6 @@ Reason: No high probability setup.
         tp1 = round(price + 3, 2)
         tp2 = round(price + 6, 2)
         tp3 = round(price + 9, 2)
-
     else:
         sl = round(price + 3.5, 2)
         tp1 = round(price - 3, 2)
@@ -236,7 +230,7 @@ Reason: No high probability setup.
     last_signal = f"""
 📊 XAUUSD {direction}
 
-Entry: {round(price,2)}
+Entry: {round(price, 2)}
 SL: {sl}
 
 TP1: {tp1}
@@ -249,7 +243,7 @@ Confidence: {confidence}%
     tg(f"""
 📊 XAUUSD {direction} SIGNAL
 
-Entry: {round(price,2)}
+Entry: {round(price, 2)}
 SL: {sl}
 
 TP1: {tp1}
@@ -258,21 +252,21 @@ TP3: {tp3}
 
 Confidence: {confidence}%
 Lot: {lot}
-
-Risk: {round(risk_amount,2)}€
+Risk: {round(risk_amount, 2)}€
 
 M1: {t1}
 M5: {t5}
 M15: {t15}
 
-RSI M1: {round(rsi1,1)}
-RSI M5: {round(rsi5,1)}
+RSI M1: {round(rsi1, 1)}
+RSI M5: {round(rsi5, 1)}
 
 Max daily signals: {MAX_SIGNALS_PER_DAY}
 """)
 
     signals_today += 1
     last_signal_time = now
+
 
 def loop():
     while True:
@@ -283,28 +277,9 @@ def loop():
 
         time.sleep(60)
 
-@app.route("/")
-def home():
-    return "Trading FX AI Bot running."
 
-@app.route("/test")
-def test():
-    tg("""
-✅ TRADING FX BOT ONLINE
-
-Advanced AI Signal Engine aktiv.
-""")
-
-    return "Test sent."
-
-@app.route("/manual")
-def manual():
-    analyze(True)
-    return "Manual analysis started."
-
-@app.route("/status")
-def status():
-    msg = f"""
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"""
 🤖 BOT STATUS
 
 Bot: ONLINE ✅
@@ -320,44 +295,13 @@ System:
 ✔ RSI Filter
 ✔ Multi TF
 ✔ AI Score
-"""
+""")
 
-    tg(msg)
-    return "Status sent."
 
-@app.route("/lastsignal")
-def lastsignal():
-    tg(last_signal)
-    return "Last signal sent."
-
-@app.route("/stats")
-def stats():
-    total = wins + losses
-
-    wr = 0
-
-    if total > 0:
-        wr = round((wins / total) * 100, 1)
-
-    msg = f"""
-📈 BOT STATS
-
-Wins: {wins}
-Losses: {losses}
-
-Total trades: {total}
-
-Winrate: {wr}%
-"""
-
-    tg(msg)
-    return "Stats sent."
-
-@app.route("/risk")
-def risk():
+async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     risk_amount = ACCOUNT * (RISK_PERCENT / 100)
 
-    msg = f"""
+    await update.message.reply_text(f"""
 💰 RISK MANAGEMENT
 
 Account: {ACCOUNT}€
@@ -366,15 +310,75 @@ Risk per trade:
 {RISK_PERCENT}%
 
 Max risk:
-{round(risk_amount,2)}€
-"""
+{round(risk_amount, 2)}€
+""")
 
-    tg(msg)
 
-    return "Risk sent."
+async def cmd_lastsignal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(last_signal)
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    total = wins + losses
+    wr = 0
+
+    if total > 0:
+        wr = round((wins / total) * 100, 1)
+
+    await update.message.reply_text(f"""
+📈 BOT STATS
+
+Wins: {wins}
+Losses: {losses}
+
+Total trades: {total}
+Winrate: {wr}%
+""")
+
+
+async def cmd_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    analyze(True)
+    await update.message.reply_text("📊 Manual analysis started.")
+
+
+def telegram_loop():
+    tg_app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    tg_app.add_handler(CommandHandler("status", cmd_status))
+    tg_app.add_handler(CommandHandler("risk", cmd_risk))
+    tg_app.add_handler(CommandHandler("lastsignal", cmd_lastsignal))
+    tg_app.add_handler(CommandHandler("stats", cmd_stats))
+    tg_app.add_handler(CommandHandler("manual", cmd_manual))
+
+    tg_app.run_polling()
+
+
+@app.route("/")
+def home():
+    return "Trading FX AI Bot running."
+
+
+@app.route("/test")
+def test():
+    tg("✅ TRADING FX BOT ONLINE\n\nAdvanced AI Signal Engine aktiv.")
+    return "Test sent."
+
+
+@app.route("/manual")
+def manual():
+    analyze(True)
+    return "Manual analysis started."
+
+
+@app.route("/status")
+def status():
+    tg("🤖 BOT STATUS ONLINE ✅")
+    return "Status sent."
+
 
 if __name__ == "__main__":
     threading.Thread(target=loop, daemon=True).start()
+    threading.Thread(target=telegram_loop, daemon=True).start()
 
     app.run(
         host="0.0.0.0",
