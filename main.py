@@ -249,9 +249,9 @@ def analyze(send_wait=True):
     direction = "WAIT"
     confidence = max(buy_percent, sell_percent)
 
-    if buy_percent >= 70:
+    if buy_percent >= 60:
         direction = "BUY"
-    elif sell_percent >= 70:
+    elif sell_percent >= 60:
         direction = "SELL"
 
     risk_amount = ACCOUNT * (RISK_PERCENT / 100)
