@@ -4,6 +4,7 @@ import datetime
 import threading
 import time
 from flask import Flask
+from statistics import mean
 
 app = Flask(__name__)
 
@@ -14,14 +15,13 @@ API_KEY = os.getenv("TWELVEDATA_API_KEY")
 ACCOUNT = float(os.getenv("ACCOUNT_BALANCE", 300))
 RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", 1))
 
-signals_today = 0
 last_update_id = 0
 last_signal = "No signal yet."
 last_crash_alert_time = 0
 
 
 # =========================================
-# TELEGRAM MESSAGE
+# TELEGRAM
 # =========================================
 
 def tg(msg, keyboard=False):
@@ -61,7 +61,7 @@ def get_data(interval):
             "symbol": "XAU/USD",
             "interval": interval,
             "apikey": API_KEY,
-            "outputsize": 80
+            "outputsize": 120
         }
     ).json()
 
@@ -74,63 +74,90 @@ def close_prices(data):
 
 
 # =========================================
-# TREND
+# EMA
 # =========================================
 
-def trend(prices):
+def ema(prices, period):
 
-    if len(prices) < 15:
-        return "neutral"
+    if len(prices) < period:
+        return None
 
-    if prices[-1] > prices[-5] > prices[-12]:
-        return "bullish"
+    multiplier = 2 / (period + 1)
 
-    if prices[-1] < prices[-5] < prices[-12]:
-        return "bearish"
+    ema_value = mean(prices[:period])
 
-    return "neutral"
+    for price in prices[period:]:
+
+        ema_value = (price - ema_value) * multiplier + ema_value
+
+    return ema_value
 
 
 # =========================================
-# DEBUG API
+# RSI
 # =========================================
 
-def debug_api():
+def rsi(prices, period=14):
 
-    try:
+    if len(prices) < period + 1:
+        return 50
 
-        results = {}
+    gains = []
+    losses = []
 
-        for interval in ["1min", "5min", "15min"]:
+    for i in range(1, period + 1):
 
-            r = requests.get(
-                "https://api.twelvedata.com/time_series",
-                params={
-                    "symbol": "XAU/USD",
-                    "interval": interval,
-                    "apikey": API_KEY,
-                    "outputsize": 5
-                }
-            ).json()
+        diff = prices[-i] - prices[-i - 1]
 
-            results[interval] = str(r)[:1000]
+        if diff >= 0:
+            gains.append(diff)
+        else:
+            losses.append(abs(diff))
 
-        tg(f"""
-🧪 DEBUG API RESPONSE
+    avg_gain = mean(gains) if gains else 0.0001
+    avg_loss = mean(losses) if losses else 0.0001
 
-1MIN:
-{results["1min"]}
+    rs = avg_gain / avg_loss
 
-5MIN:
-{results["5min"]}
+    return round(100 - (100 / (1 + rs)), 2)
 
-15MIN:
-{results["15min"]}
-""")
 
-    except Exception as e:
+# =========================================
+# ATR
+# =========================================
 
-        tg(f"⚠️ DEBUG ERROR: {e}")
+def atr(data, period=14):
+
+    if len(data) < period + 1:
+        return 0
+
+    trs = []
+
+    for i in range(1, period + 1):
+
+        high = float(data[-i]["high"])
+        low = float(data[-i]["low"])
+
+        trs.append(high - low)
+
+    return round(mean(trs), 2)
+
+
+# =========================================
+# SESSION FILTER
+# =========================================
+
+def session_name():
+
+    hour = datetime.datetime.utcnow().hour
+
+    if 6 <= hour <= 11:
+        return "LONDON"
+
+    if 12 <= hour <= 17:
+        return "NEW YORK"
+
+    return "ASIA"
 
 
 # =========================================
@@ -152,43 +179,113 @@ def calculate_market_status():
 
     price = p1[-1]
 
-    t1 = trend(p1)
-    t5 = trend(p5)
-    t15 = trend(p15)
+    # EMA
+    ema20_m5 = ema(p5, 20)
+    ema50_m5 = ema(p5, 50)
+
+    ema20_m15 = ema(p15, 20)
+    ema50_m15 = ema(p15, 50)
+
+    # RSI
+    rsi_m5 = rsi(p5)
+    rsi_m15 = rsi(p15)
+
+    # ATR
+    atr_m5 = atr(m5)
+
+    # SESSION
+    session = session_name()
 
     buy_score = 0
     sell_score = 0
 
-    # M15
-    if t15 == "bullish":
-        buy_score += 30
+    # =========================
+    # MAIN TREND M15
+    # =========================
 
-    elif t15 == "bearish":
-        sell_score += 30
+    if ema20_m15 and ema50_m15:
 
-    # M5
-    if t5 == "bullish":
-        buy_score += 25
+        if ema20_m15 > ema50_m15:
+            buy_score += 35
 
-    elif t5 == "bearish":
-        sell_score += 25
+        elif ema20_m15 < ema50_m15:
+            sell_score += 35
 
-    # M1
-    if t1 == "bullish":
+    # =========================
+    # M5 CONFIRMATION
+    # =========================
+
+    if ema20_m5 and ema50_m5:
+
+        if ema20_m5 > ema50_m5:
+            buy_score += 25
+
+        elif ema20_m5 < ema50_m5:
+            sell_score += 25
+
+    # =========================
+    # RSI FILTER
+    # =========================
+
+    if rsi_m5 > 55:
         buy_score += 15
 
-    elif t1 == "bearish":
+    if rsi_m5 < 45:
         sell_score += 15
 
-    # REALISTIC PERCENTAGES
-    buy_percent = round((buy_score / 70) * 100)
-    sell_percent = round((sell_score / 70) * 100)
+    if rsi_m15 > 55:
+        buy_score += 10
+
+    if rsi_m15 < 45:
+        sell_score += 10
+
+    # =========================
+    # ENTRY TIMING M1
+    # =========================
+
+    if p1[-1] > p1[-3]:
+        buy_score += 10
+
+    elif p1[-1] < p1[-3]:
+        sell_score += 10
+
+    # =========================
+    # NO TRADE ZONE
+    # =========================
+
+    no_trade = False
+
+    if atr_m5 < 1.5:
+        no_trade = True
+
+    # =========================
+    # SESSION BOOST
+    # =========================
+
+    if session in ["LONDON", "NEW YORK"]:
+
+        buy_score += 5
+        sell_score += 5
+
+    # =========================
+    # PERCENTAGES
+    # =========================
+
+    buy_percent = round((buy_score / 100) * 100)
+    sell_percent = round((sell_score / 100) * 100)
 
     buy_percent = min(buy_percent, 100)
     sell_percent = min(sell_percent, 100)
 
+    # =========================
     # BIAS
-    if buy_percent > sell_percent:
+    # =========================
+
+    if no_trade:
+
+        bias = "NO TRADE ZONE"
+
+    elif buy_percent > sell_percent:
 
         bias = "BUY PRESSURE"
 
@@ -202,61 +299,19 @@ def calculate_market_status():
 
     return {
         "price": price,
-        "t1": t1,
-        "t5": t5,
-        "t15": t15,
         "buy_percent": buy_percent,
         "sell_percent": sell_percent,
         "bias": bias,
-        "buy_score": buy_score,
-        "sell_score": sell_score
+        "session": session,
+        "rsi_m5": rsi_m5,
+        "rsi_m15": rsi_m15,
+        "atr_m5": atr_m5,
+        "ema20_m5": ema20_m5,
+        "ema50_m5": ema50_m5,
+        "ema20_m15": ema20_m15,
+        "ema50_m15": ema50_m15,
+        "no_trade": no_trade
     }
-
-
-# =========================================
-# LIVE STATUS
-# =========================================
-
-def live_status():
-
-    status = calculate_market_status()
-
-    if not status:
-
-        tg("⚠️ Data error. No market data received.")
-
-        return
-
-    tg(f"""
-📍 LIVE MARKET STATUS
-
-XAUUSD:
-{round(status["price"], 2)}
-
-BUY chance:
-{status["buy_percent"]}%
-
-SELL chance:
-{status["sell_percent"]}%
-
-Bias:
-{status["bias"]}
-
-M1:
-{status["t1"]}
-
-M5:
-{status["t5"]}
-
-M15:
-{status["t15"]}
-
-BUY SCORE:
-{status["buy_score"]}
-
-SELL SCORE:
-{status["sell_score"]}
-""")
 
 
 # =========================================
@@ -271,61 +326,68 @@ def force_signal_request():
 
     if not status:
 
-        tg("⚠️ Data error. No market data received.")
+        tg("⚠️ Market data error.")
 
         return
 
     price = status["price"]
 
-    buy_percent = status["buy_percent"]
-    sell_percent = status["sell_percent"]
+    buy = status["buy_percent"]
+    sell = status["sell_percent"]
 
-    # DIRECTION
-    if buy_percent >= 60:
+    if status["no_trade"]:
+
+        direction = "WAIT"
+
+    elif buy >= 65:
 
         direction = "BUY"
 
-        sl = round(price - 3.5, 2)
-
-        tp1 = round(price + 3, 2)
-        tp2 = round(price + 6, 2)
-        tp3 = round(price + 9, 2)
-
-    elif sell_percent >= 60:
+    elif sell >= 65:
 
         direction = "SELL"
-
-        sl = round(price + 3.5, 2)
-
-        tp1 = round(price - 3, 2)
-        tp2 = round(price - 6, 2)
-        tp3 = round(price - 9, 2)
 
     else:
 
         direction = "WAIT"
+
+    if direction == "BUY":
+
+        sl = round(price - 4, 2)
+
+        tp1 = round(price + 4, 2)
+        tp2 = round(price + 8, 2)
+        tp3 = round(price + 12, 2)
+
+    elif direction == "SELL":
+
+        sl = round(price + 4, 2)
+
+        tp1 = round(price - 4, 2)
+        tp2 = round(price - 8, 2)
+        tp3 = round(price - 12, 2)
+
+    else:
 
         sl = "-"
         tp1 = "-"
         tp2 = "-"
         tp3 = "-"
 
-    confidence = max(buy_percent, sell_percent)
-
     msg = f"""
-🎯 REQUESTED SIGNAL
+🎯 AI SIGNAL
 
-Current price:
+Price:
 {round(price, 2)}
 
 Direction:
 {direction}
 
 BUY chance:
-{buy_percent}%
+{buy}%
 
 SELL chance:
-{sell_percent}%
+{sell}%
 
 SL:
 {sl}
@@ -339,17 +401,20 @@ TP2:
 TP3:
 {tp3}
 
-Confidence:
-{confidence}%
+Session:
+{status["session"]}
 
-M1:
-{status["t1"]}
+RSI M5:
+{status["rsi_m5"]}
 
-M5:
-{status["t5"]}
+RSI M15:
+{status["rsi_m15"]}
 
-M15:
-{status["t15"]}
+ATR:
+{status["atr_m5"]}
+
+Bias:
+{status["bias"]}
 """
 
     last_signal = msg
@@ -358,65 +423,58 @@ M15:
 
 
 # =========================================
-# CRASH DETECTOR
+# LIVE STATUS
 # =========================================
 
-def crash_detector():
+def live_status():
 
-    global last_crash_alert_time
+    status = calculate_market_status()
 
-    now = time.time()
+    if not status:
 
-    if now - last_crash_alert_time < 600:
+        tg("⚠️ Market data error.")
+
         return
 
-    m1 = get_data("1min")
-
-    if not m1:
-        return
-
-    p1 = close_prices(m1)
-
-    current_price = p1[-1]
-
-    last5 = p1[-5:]
-
-    bearish = 0
-
-    for i in range(1, len(last5)):
-
-        if last5[i] < last5[i - 1]:
-            bearish += 1
-
-    move_size = max(last5) - min(last5)
-
-    score = 0
-
-    if bearish >= 4:
-        score += 40
-
-    if move_size >= 8:
-        score += 40
-
-    if move_size >= 12:
-        score += 20
-
-    if score >= 70:
-
-        tg(f"""
-🚨 STRONG SELL MOMENTUM DETECTED
+    tg(f"""
+📍 LIVE MARKET STATUS
 
 Price:
-{round(current_price, 2)}
+{round(status["price"], 2)}
 
-Crash probability:
-{score}%
+BUY:
+{status["buy_percent"]}%
 
-High volatility detected.
-SELL continuation possible.
+SELL:
+{status["sell_percent"]}%
+
+Bias:
+{status["bias"]}
+
+Session:
+{status["session"]}
+
+RSI M5:
+{status["rsi_m5"]}
+
+RSI M15:
+{status["rsi_m15"]}
+
+ATR:
+{status["atr_m5"]}
+
+EMA20 M5:
+{round(status["ema20_m5"], 2)}
+
+EMA50 M5:
+{round(status["ema50_m5"], 2)}
+
+EMA20 M15:
+{round(status["ema20_m15"], 2)}
+
+EMA50 M15:
+{round(status["ema50_m15"], 2)}
 """)
-
-        last_crash_alert_time = now
 
 
 # =========================================
@@ -425,84 +483,76 @@ SELL continuation possible.
 
 def auto_signal_loop():
 
-    global last_signal
-
     while True:
 
         try:
 
             status = calculate_market_status()
 
-            if status:
+            if status and not status["no_trade"]:
 
-                buy = status["buy_percent"]
-                sell = status["sell_percent"]
+                if status["buy_percent"] >= 75:
 
-                if buy >= 70:
-
-                    msg = f"""
+                    tg(f"""
 📈 AUTO BUY SIGNAL
 
+BUY chance:
+{status["buy_percent"]}%
+
 Price:
 {round(status["price"], 2)}
-
-BUY chance:
-{buy}%
-
-M1:
-{status["t1"]}
-
-M5:
-{status["t5"]}
-
-M15:
-{status["t15"]}
-"""
-
-                    last_signal = msg
-
-                    tg(msg)
+""")
 
                     time.sleep(900)
 
-                elif sell >= 70:
+                elif status["sell_percent"] >= 75:
 
-                    msg = f"""
+                    tg(f"""
 📉 AUTO SELL SIGNAL
 
+SELL chance:
+{status["sell_percent"]}%
+
 Price:
 {round(status["price"], 2)}
-
-SELL chance:
-{sell}%
-
-M1:
-{status["t1"]}
-
-M5:
-{status["t5"]}
-
-M15:
-{status["t15"]}
-"""
-
-                    last_signal = msg
-
-                    tg(msg)
+""")
 
                     time.sleep(900)
-
-            crash_detector()
 
         except Exception as e:
 
-            print("Auto signal error:", e)
+            print("Loop error:", e)
 
         time.sleep(60)
 
 
 # =========================================
-# TELEGRAM POLLING
+# DEBUG API
+# =========================================
+
+def debug_api():
+
+    try:
+
+        r = requests.get(
+            "https://api.twelvedata.com/time_series",
+            params={
+                "symbol": "XAU/USD",
+                "interval": "5min",
+                "apikey": API_KEY,
+                "outputsize": 5
+            }
+        ).json()
+
+        tg(str(r)[:3500])
+
+    except Exception as e:
+
+        tg(f"DEBUG ERROR: {e}")
+
+
+# =========================================
+# TELEGRAM
 # =========================================
 
 def telegram_polling():
@@ -532,23 +582,13 @@ def telegram_polling():
                 if text == "/start":
 
                     tg(
-                        "🤖 TRADING FX BOT ONLINE",
+                        "🤖 AI TRADING BOT ONLINE",
                         keyboard=True
                     )
 
                 elif text == "📊 STATUS":
 
-                    tg(f"""
-📊 BOT STATUS
-
-ONLINE ✅
-
-Account:
-{ACCOUNT}€
-
-Risk:
-{RISK_PERCENT}%
-""")
+                    tg("✅ BOT ONLINE")
 
                 elif text == "📍 LIVE STATUS":
 
@@ -576,19 +616,19 @@ Risk:
 
                 elif text == "📋 STATS":
 
-                    tg(f"""
+                    tg("""
 📋 STATS
 
-Signals today:
-{signals_today}
+AI ENGINE ACTIVE
+EMA + RSI + ATR ENABLED
 """)
 
                 elif text == "🔥 SCALP MODE":
 
                     tg("""
-🔥 SCALP MODE ACTIVE
+🔥 SCALP MODE
 
-Fast M1 + M5 signals enabled.
+M1 timing enabled.
 """)
 
                 elif text == "🧪 DEBUG API":
@@ -609,18 +649,18 @@ Fast M1 + M5 signals enabled.
 @app.route("/")
 def home():
 
-    return "TRADING FX BOT ONLINE"
+    return "AI BOT ONLINE"
 
 
 @app.route("/test")
 def test():
 
     tg(
-        "✅ BOT ONLINE",
+        "✅ AI BOT ONLINE",
         keyboard=True
     )
 
-    return "Test sent."
+    return "ok"
 
 
 # =========================================
