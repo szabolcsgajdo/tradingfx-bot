@@ -13,19 +13,16 @@ API_KEY = os.getenv("TWELVEDATA_API_KEY")
 
 ACCOUNT = float(os.getenv("ACCOUNT_BALANCE", 300))
 RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", 1))
-MAX_SIGNALS_PER_DAY = 3
 
 signals_today = 0
-last_signal_date = None
-last_signal = "No signal yet."
 last_update_id = 0
-active_trade = None
+last_signal = "No signal yet."
 last_crash_alert_time = 0
 
 
-# =========================
-# TELEGRAM SEND
-# =========================
+# =========================================
+# TELEGRAM MESSAGE
+# =========================================
 
 def tg(msg, keyboard=False):
 
@@ -52,9 +49,9 @@ def tg(msg, keyboard=False):
     )
 
 
-# =========================
+# =========================================
 # MARKET DATA
-# =========================
+# =========================================
 
 def get_data(interval):
 
@@ -72,10 +69,18 @@ def get_data(interval):
 
 
 def close_prices(data):
+
     return [float(x["close"]) for x in data]
 
 
+# =========================================
+# TREND
+# =========================================
+
 def trend(prices):
+
+    if len(prices) < 15:
+        return "neutral"
 
     if prices[-1] > prices[-5] > prices[-12]:
         return "bullish"
@@ -86,28 +91,41 @@ def trend(prices):
     return "neutral"
 
 
-# =========================
+# =========================================
 # DEBUG API
-# =========================
+# =========================================
 
 def debug_api():
 
     try:
 
-        r = requests.get(
-            "https://api.twelvedata.com/time_series",
-            params={
-                "symbol": "XAU/USD",
-                "interval": "1min",
-                "apikey": API_KEY,
-                "outputsize": 5
-            }
-        ).json()
+        results = {}
+
+        for interval in ["1min", "5min", "15min"]:
+
+            r = requests.get(
+                "https://api.twelvedata.com/time_series",
+                params={
+                    "symbol": "XAU/USD",
+                    "interval": interval,
+                    "apikey": API_KEY,
+                    "outputsize": 5
+                }
+            ).json()
+
+            results[interval] = str(r)[:1000]
 
         tg(f"""
 🧪 DEBUG API RESPONSE
 
-{str(r)[:3500]}
+1MIN:
+{results["1min"]}
+
+5MIN:
+{results["5min"]}
+
+15MIN:
+{results["15min"]}
 """)
 
     except Exception as e:
@@ -115,9 +133,9 @@ def debug_api():
         tg(f"⚠️ DEBUG ERROR: {e}")
 
 
-# =========================
+# =========================================
 # MARKET STATUS
-# =========================
+# =========================================
 
 def calculate_market_status():
 
@@ -141,57 +159,46 @@ def calculate_market_status():
     buy_score = 0
     sell_score = 0
 
+    # M15
     if t15 == "bullish":
         buy_score += 30
 
+    elif t15 == "bearish":
+        sell_score += 30
+
+    # M5
     if t5 == "bullish":
         buy_score += 25
 
+    elif t5 == "bearish":
+        sell_score += 25
+
+    # M1
     if t1 == "bullish":
         buy_score += 15
 
-    if t15 == "bearish":
-        sell_score += 30
-
-    if t5 == "bearish":
-        sell_score += 25
-
-    if t1 == "bearish":
+    elif t1 == "bearish":
         sell_score += 15
 
-    total_score = buy_score + sell_score
+    # REALISTIC PERCENTAGES
+    buy_percent = round((buy_score / 70) * 100)
+    sell_percent = round((sell_score / 70) * 100)
 
-    if total_score == 0:
-        buy_percent = 50
-        sell_percent = 50
+    buy_percent = min(buy_percent, 100)
+    sell_percent = min(sell_percent, 100)
 
-    else:
-        buy_percent = round((buy_score / total_score) * 100)
-        sell_percent = 100 - buy_percent
-
+    # BIAS
     if buy_percent > sell_percent:
 
         bias = "BUY PRESSURE"
-
-        buy_text = "Better probability."
-
-        sell_text = "Risky sell."
 
     elif sell_percent > buy_percent:
 
         bias = "SELL PRESSURE"
 
-        buy_text = "Risky buy."
-
-        sell_text = "Better probability."
-
     else:
 
         bias = "NEUTRAL"
-
-        buy_text = "No clear edge."
-
-        sell_text = "No clear edge."
 
     return {
         "price": price,
@@ -201,14 +208,14 @@ def calculate_market_status():
         "buy_percent": buy_percent,
         "sell_percent": sell_percent,
         "bias": bias,
-        "buy_text": buy_text,
-        "sell_text": sell_text
+        "buy_score": buy_score,
+        "sell_score": sell_score
     }
 
 
-# =========================
+# =========================================
 # LIVE STATUS
-# =========================
+# =========================================
 
 def live_status():
 
@@ -244,19 +251,21 @@ M5:
 M15:
 {status["t15"]}
 
-BUY INFO:
-{status["buy_text"]}
+BUY SCORE:
+{status["buy_score"]}
 
-SELL INFO:
-{status["sell_text"]}
+SELL SCORE:
+{status["sell_score"]}
 """)
 
 
-# =========================
+# =========================================
 # REQUEST SIGNAL
-# =========================
+# =========================================
 
 def force_signal_request():
+
+    global last_signal
 
     status = calculate_market_status()
 
@@ -271,7 +280,8 @@ def force_signal_request():
     buy_percent = status["buy_percent"]
     sell_percent = status["sell_percent"]
 
-    if buy_percent > sell_percent:
+    # DIRECTION
+    if buy_percent >= 60:
 
         direction = "BUY"
 
@@ -281,7 +291,7 @@ def force_signal_request():
         tp2 = round(price + 6, 2)
         tp3 = round(price + 9, 2)
 
-    elif sell_percent > buy_percent:
+    elif sell_percent >= 60:
 
         direction = "SELL"
 
@@ -302,7 +312,7 @@ def force_signal_request():
 
     confidence = max(buy_percent, sell_percent)
 
-    tg(f"""
+    msg = f"""
 🎯 REQUESTED SIGNAL
 
 Current price:
@@ -340,12 +350,16 @@ M5:
 
 M15:
 {status["t15"]}
-""")
+"""
+
+    last_signal = msg
+
+    tg(msg)
 
 
-# =========================
+# =========================================
 # CRASH DETECTOR
-# =========================
+# =========================================
 
 def crash_detector():
 
@@ -405,28 +419,91 @@ SELL continuation possible.
         last_crash_alert_time = now
 
 
-# =========================
-# LOOP
-# =========================
+# =========================================
+# AUTO SIGNAL LOOP
+# =========================================
 
-def market_loop():
+def auto_signal_loop():
+
+    global last_signal
 
     while True:
 
         try:
 
+            status = calculate_market_status()
+
+            if status:
+
+                buy = status["buy_percent"]
+                sell = status["sell_percent"]
+
+                if buy >= 70:
+
+                    msg = f"""
+📈 AUTO BUY SIGNAL
+
+Price:
+{round(status["price"], 2)}
+
+BUY chance:
+{buy}%
+
+M1:
+{status["t1"]}
+
+M5:
+{status["t5"]}
+
+M15:
+{status["t15"]}
+"""
+
+                    last_signal = msg
+
+                    tg(msg)
+
+                    time.sleep(900)
+
+                elif sell >= 70:
+
+                    msg = f"""
+📉 AUTO SELL SIGNAL
+
+Price:
+{round(status["price"], 2)}
+
+SELL chance:
+{sell}%
+
+M1:
+{status["t1"]}
+
+M5:
+{status["t5"]}
+
+M15:
+{status["t15"]}
+"""
+
+                    last_signal = msg
+
+                    tg(msg)
+
+                    time.sleep(900)
+
             crash_detector()
 
         except Exception as e:
 
-            print("Loop error:", e)
+            print("Auto signal error:", e)
 
         time.sleep(60)
 
 
-# =========================
+# =========================================
 # TELEGRAM POLLING
-# =========================
+# =========================================
 
 def telegram_polling():
 
@@ -525,9 +602,9 @@ Fast M1 + M5 signals enabled.
         time.sleep(2)
 
 
-# =========================
+# =========================================
 # FLASK
-# =========================
+# =========================================
 
 @app.route("/")
 def home():
@@ -546,14 +623,14 @@ def test():
     return "Test sent."
 
 
-# =========================
+# =========================================
 # START
-# =========================
+# =========================================
 
 if __name__ == "__main__":
 
     threading.Thread(
-        target=market_loop,
+        target=auto_signal_loop,
         daemon=True
     ).start()
 
