@@ -30,8 +30,9 @@ def tg(msg, keyboard=False):
         payload["reply_markup"] = {
             "keyboard": [
                 ["📊 STATUS", "📍 LIVE STATUS"],
-                ["📉 LAST SIGNAL", "⚠️ RISK"],
-                ["📋 STATS", "🔥 SCALP MODE"]
+                ["🎯 REQUEST SIGNAL", "📉 LAST SIGNAL"],
+                ["⚠️ RISK", "📋 STATS"],
+                ["🔥 SCALP MODE"]
             ],
             "resize_keyboard": True
         }
@@ -46,7 +47,7 @@ def get_data(interval):
     r = requests.get(
         "https://api.twelvedata.com/time_series",
         params={
-            "symbol": "XAUUSD",
+            "symbol": "XAU/USD",
             "interval": interval,
             "apikey": API_KEY,
             "outputsize": 80
@@ -66,90 +67,6 @@ def trend(prices):
     if prices[-1] < prices[-5] < prices[-12]:
         return "bearish"
     return "neutral"
-
-
-def candle_body(candle):
-    return abs(float(candle["close"]) - float(candle["open"]))
-
-
-def candle_direction(candle):
-    if float(candle["close"]) > float(candle["open"]):
-        return "bullish"
-    if float(candle["close"]) < float(candle["open"]):
-        return "bearish"
-    return "neutral"
-
-
-def detect_crash():
-    global last_crash_alert_time
-
-    now = time.time()
-
-    if now - last_crash_alert_time < 600:
-        return
-
-    m1 = get_data("1min")
-    m5 = get_data("5min")
-
-    if not m1 or not m5 or len(m1) < 20 or len(m5) < 10:
-        return
-
-    last_price = float(m1[-1]["close"])
-    last_5_m1 = m1[-5:]
-
-    bearish_count = sum(
-        1 for c in last_5_m1 if candle_direction(c) == "bearish"
-    )
-
-    bodies = [candle_body(c) for c in m1[-20:]]
-    avg_body = sum(bodies[:-1]) / max(len(bodies[:-1]), 1)
-    last_body = bodies[-1]
-
-    recent_low_m5 = min(float(c["low"]) for c in m5[-10:-1])
-    current_m5_close = float(m5[-1]["close"])
-
-    crash_score = 0
-    reasons = []
-
-    if bearish_count >= 4:
-        crash_score += 25
-        reasons.append("4/5 recent M1 candles bearish")
-
-    if avg_body > 0 and last_body > avg_body * 2:
-        crash_score += 25
-        reasons.append("large bearish M1 candle body")
-
-    if current_m5_close < recent_low_m5:
-        crash_score += 30
-        reasons.append("M5 structure break / recent low broken")
-
-    drop_5min = float(m1[-5]["close"]) - last_price
-
-    if drop_5min >= 3:
-        crash_score += 25
-        reasons.append(f"fast drop: {round(drop_5min, 2)} points in ~5 minutes")
-
-    if crash_score >= 70:
-        last_crash_alert_time = now
-
-        tg(f"""
-🚨 STRONG SELL MOMENTUM DETECTED
-
-XAUUSD current price:
-{round(last_price, 2)}
-
-Crash probability:
-{min(crash_score, 95)}%
-
-Reason:
-- {chr(10).join(reasons)}
-
-Action:
-SELL continuation possible.
-
-Risk:
-High volatility — use smaller lot and strict SL.
-""")
 
 
 def calculate_market_status():
@@ -335,6 +252,89 @@ Signals today: {signals_today}/{MAX_SIGNALS_PER_DAY}
     signals_today += 1
 
 
+def force_signal_request():
+    status = calculate_market_status()
+
+    if not status:
+        tg("⚠️ Data error. No market data received.")
+        return
+
+    price = status["price"]
+    buy_percent = status["buy_percent"]
+    sell_percent = status["sell_percent"]
+
+    if buy_percent > sell_percent:
+        direction = "BUY"
+        sl = round(price - 3.5, 2)
+        tp1 = round(price + 3, 2)
+        tp2 = round(price + 6, 2)
+        tp3 = round(price + 9, 2)
+    elif sell_percent > buy_percent:
+        direction = "SELL"
+        sl = round(price + 3.5, 2)
+        tp1 = round(price - 3, 2)
+        tp2 = round(price - 6, 2)
+        tp3 = round(price - 9, 2)
+    else:
+        direction = "WAIT"
+        sl = "-"
+        tp1 = "-"
+        tp2 = "-"
+        tp3 = "-"
+
+    confidence = max(buy_percent, sell_percent)
+    risk_amount = ACCOUNT * (RISK_PERCENT / 100)
+
+    tg(f"""
+🎯 REQUESTED SIGNAL
+
+XAUUSD current price:
+{round(price, 2)}
+
+Direction:
+{direction}
+
+BUY chance:
+{buy_percent}%
+
+SELL chance:
+{sell_percent}%
+
+Entry:
+{round(price, 2)}
+
+SL:
+{sl}
+
+TP1:
+{tp1}
+
+TP2:
+{tp2}
+
+TP3:
+{tp3}
+
+Confidence:
+{confidence}%
+
+Risk:
+{round(risk_amount, 2)}€
+
+M1:
+{status["t1"]}
+
+M5:
+{status["t5"]}
+
+M15:
+{status["t15"]}
+
+Note:
+This is a requested signal, not automatic high-probability alert.
+""")
+
+
 def check_trade_status():
     global active_trade
 
@@ -509,11 +509,81 @@ Sell score:
 """)
 
 
+def crash_detector():
+    global last_crash_alert_time
+
+    now = time.time()
+
+    if now - last_crash_alert_time < 600:
+        return
+
+    m1 = get_data("1min")
+    m5 = get_data("5min")
+
+    if not m1 or not m5:
+        return
+
+    p1 = close_prices(m1)
+    p5 = close_prices(m5)
+
+    current_price = p1[-1]
+    last5 = p1[-5:]
+
+    bearish_candles = 0
+
+    for i in range(1, len(last5)):
+        if last5[i] < last5[i - 1]:
+            bearish_candles += 1
+
+    move_size = max(last5) - min(last5)
+    t5 = trend(p5)
+
+    crash_score = 0
+
+    if bearish_candles >= 4:
+        crash_score += 35
+
+    if move_size >= 8:
+        crash_score += 35
+
+    if t5 == "bearish":
+        crash_score += 20
+
+    if move_size >= 12:
+        crash_score += 10
+
+    if crash_score >= 70:
+        last_crash_alert_time = now
+
+        tg(f"""
+🚨 STRONG SELL MOMENTUM DETECTED
+
+XAUUSD current price:
+{round(current_price, 2)}
+
+Crash probability:
+{crash_score}%
+
+Reason:
+- Bearish acceleration
+- Strong M1 dump
+- Fast volatility spike
+- M5 bearish structure
+
+Action:
+SELL continuation possible
+
+Risk:
+⚠️ High volatility detected.
+Use smaller lot size.
+""")
+
+
 def market_loop():
     while True:
-        detect_crash()
         analyze(send_wait=False)
         check_trade_status()
+        crash_detector()
         time.sleep(60)
 
 
@@ -549,11 +619,15 @@ Risk: {RISK_PERCENT}%
                 elif text == "📍 LIVE STATUS":
                     live_status()
 
+                elif text == "🎯 REQUEST SIGNAL":
+                    force_signal_request()
+
                 elif text == "📉 LAST SIGNAL":
                     tg(last_signal)
 
                 elif text == "⚠️ RISK":
                     risk_amount = ACCOUNT * (RISK_PERCENT / 100)
+
                     tg(f"""
 ⚠️ RISK MANAGEMENT
 
@@ -577,6 +651,7 @@ Max daily: {MAX_SIGNALS_PER_DAY}
 🔥 SCALP MODE
 
 M1 + M5 fast signal mode active.
+Crash detector enabled.
 """)
 
         except Exception as e:
