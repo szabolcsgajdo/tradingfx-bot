@@ -1,6 +1,6 @@
 # =========================================
 # SMART MONEY AI ENGINE
-# Liquidity Sweep + BOS + CHOCH
+# WITH TP / SL TRACKING
 # =========================================
 
 import os
@@ -23,6 +23,11 @@ RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", 1))
 last_update_id = 0
 last_signal = "No signal yet."
 last_signal_time = 0
+
+active_trade = None
+
+CACHE = {}
+CACHE_TIME = {}
 
 
 # =========================================
@@ -58,7 +63,13 @@ def tg(msg, keyboard=False):
 # MARKET DATA
 # =========================================
 
-def get_data(interval, size=150):
+def get_data(interval, size=120):
+
+    now = time.time()
+
+    if interval in CACHE:
+        if now - CACHE_TIME[interval] < 10:
+            return CACHE[interval]
 
     r = requests.get(
         "https://api.twelvedata.com/time_series",
@@ -70,7 +81,12 @@ def get_data(interval, size=150):
         }
     ).json()
 
-    return list(reversed(r.get("values", [])))
+    data = list(reversed(r.get("values", [])))
+
+    CACHE[interval] = data
+    CACHE_TIME[interval] = now
+
+    return data
 
 
 def closes(data):
@@ -157,7 +173,7 @@ def atr(data, period=14):
 
 
 # =========================================
-# SESSION FILTER
+# SESSION
 # =========================================
 
 def session_name():
@@ -193,11 +209,9 @@ def liquidity_sweep(data):
     sweep_high = False
     sweep_low = False
 
-    # stop hunt above highs
     if last_high > recent_high and last_close < recent_high:
         sweep_high = True
 
-    # stop hunt below lows
     if last_low < recent_low and last_close > recent_low:
         sweep_low = True
 
@@ -205,7 +219,7 @@ def liquidity_sweep(data):
 
 
 # =========================================
-# BOS / CHOCH
+# BOS
 # =========================================
 
 def structure_break(data):
@@ -279,10 +293,6 @@ def calculate_market_status():
 
     notes = []
 
-    # =========================================
-    # EMA TREND
-    # =========================================
-
     ema20_m5 = ema(p5, 20)
     ema50_m5 = ema(p5, 50)
 
@@ -303,10 +313,6 @@ def calculate_market_status():
     elif ema20_m5 < ema50_m5:
         sell_score += 25
 
-    # =========================================
-    # RSI
-    # =========================================
-
     rsi5 = rsi(p5)
 
     if rsi5 > 55:
@@ -315,19 +321,11 @@ def calculate_market_status():
     if rsi5 < 45:
         sell_score += 15
 
-    # =========================================
-    # ENTRY TIMING
-    # =========================================
-
     if p1[-1] > p1[-3]:
         buy_score += 10
 
     elif p1[-1] < p1[-3]:
         sell_score += 10
-
-    # =========================================
-    # LIQUIDITY SWEEP
-    # =========================================
 
     sweep_high, sweep_low = liquidity_sweep(m5)
 
@@ -339,10 +337,6 @@ def calculate_market_status():
         buy_score += 20
         notes.append("Liquidity sweep below lows")
 
-    # =========================================
-    # BOS / CHOCH
-    # =========================================
-
     bos_bull, bos_bear = structure_break(m5)
 
     if bos_bull:
@@ -352,10 +346,6 @@ def calculate_market_status():
     if bos_bear:
         sell_score += 20
         notes.append("Bearish BOS")
-
-    # =========================================
-    # REJECTION WICK
-    # =========================================
 
     bullish_rejection, bearish_rejection = rejection_wick(m5)
 
@@ -367,10 +357,6 @@ def calculate_market_status():
         sell_score += 15
         notes.append("Bearish rejection wick")
 
-    # =========================================
-    # ATR
-    # =========================================
-
     atr5 = atr(m5)
 
     no_trade = False
@@ -379,26 +365,14 @@ def calculate_market_status():
         no_trade = True
         notes.append("Low volatility")
 
-    # =========================================
-    # SESSION
-    # =========================================
-
     session = session_name()
 
     if session in ["LONDON", "NEW YORK"]:
         buy_score += 5
         sell_score += 5
 
-    # =========================================
-    # PERCENTAGES
-    # =========================================
-
     buy_percent = min(100, round((buy_score / 120) * 100))
     sell_percent = min(100, round((sell_score / 120) * 100))
-
-    # =========================================
-    # BIAS
-    # =========================================
 
     if no_trade:
         bias = "NO TRADE"
@@ -432,6 +406,7 @@ def calculate_market_status():
 def build_signal():
 
     global last_signal
+    global active_trade
 
     status = calculate_market_status()
 
@@ -477,6 +452,21 @@ def build_signal():
         tp1 = "-"
         tp2 = "-"
         tp3 = "-"
+
+    if direction in ["BUY", "SELL"]:
+
+        active_trade = {
+            "direction": direction,
+            "entry": round(price, 2),
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "tp1_hit": False,
+            "tp2_hit": False,
+            "tp3_hit": False,
+            "closed": False
+        }
 
     note_text = "\n- ".join(status["notes"])
 
@@ -529,6 +519,190 @@ Notes:
 
 
 # =========================================
+# TP / SL TRACKER
+# =========================================
+
+def check_active_trade():
+
+    global active_trade
+
+    if not active_trade:
+        return
+
+    if active_trade.get("closed"):
+        return
+
+    data = get_data("1min", size=5)
+
+    if not data:
+        return
+
+    price = float(data[-1]["close"])
+
+    direction = active_trade["direction"]
+
+    if direction == "BUY":
+
+        if price <= active_trade["sl"]:
+
+            tg(f"""
+🛑 SL HIT
+
+BUY TRADE CLOSED
+
+Entry:
+{active_trade["entry"]}
+
+SL:
+{active_trade["sl"]}
+
+Current:
+{round(price, 2)}
+""")
+
+            active_trade["closed"] = True
+            return
+
+        if (
+            price >= active_trade["tp1"]
+            and not active_trade["tp1_hit"]
+        ):
+
+            tg(f"""
+✅ TP1 HIT
+
+BUY TRADE
+
+TP1:
+{active_trade["tp1"]}
+
+Current:
+{round(price, 2)}
+""")
+
+            active_trade["tp1_hit"] = True
+
+        if (
+            price >= active_trade["tp2"]
+            and not active_trade["tp2_hit"]
+        ):
+
+            tg(f"""
+✅ TP2 HIT
+
+BUY TRADE
+
+TP2:
+{active_trade["tp2"]}
+
+Current:
+{round(price, 2)}
+""")
+
+            active_trade["tp2_hit"] = True
+
+        if (
+            price >= active_trade["tp3"]
+            and not active_trade["tp3_hit"]
+        ):
+
+            tg(f"""
+🏆 TP3 HIT
+
+BUY TRADE COMPLETED
+
+TP3:
+{active_trade["tp3"]}
+
+Current:
+{round(price, 2)}
+""")
+
+            active_trade["tp3_hit"] = True
+            active_trade["closed"] = True
+
+    elif direction == "SELL":
+
+        if price >= active_trade["sl"]:
+
+            tg(f"""
+🛑 SL HIT
+
+SELL TRADE CLOSED
+
+Entry:
+{active_trade["entry"]}
+
+SL:
+{active_trade["sl"]}
+
+Current:
+{round(price, 2)}
+""")
+
+            active_trade["closed"] = True
+            return
+
+        if (
+            price <= active_trade["tp1"]
+            and not active_trade["tp1_hit"]
+        ):
+
+            tg(f"""
+✅ TP1 HIT
+
+SELL TRADE
+
+TP1:
+{active_trade["tp1"]}
+
+Current:
+{round(price, 2)}
+""")
+
+            active_trade["tp1_hit"] = True
+
+        if (
+            price <= active_trade["tp2"]
+            and not active_trade["tp2_hit"]
+        ):
+
+            tg(f"""
+✅ TP2 HIT
+
+SELL TRADE
+
+TP2:
+{active_trade["tp2"]}
+
+Current:
+{round(price, 2)}
+""")
+
+            active_trade["tp2_hit"] = True
+
+        if (
+            price <= active_trade["tp3"]
+            and not active_trade["tp3_hit"]
+        ):
+
+            tg(f"""
+🏆 TP3 HIT
+
+SELL TRADE COMPLETED
+
+TP3:
+{active_trade["tp3"]}
+
+Current:
+{round(price, 2)}
+""")
+
+            active_trade["tp3_hit"] = True
+            active_trade["closed"] = True
+
+
+# =========================================
 # LIVE STATUS
 # =========================================
 
@@ -549,6 +723,14 @@ def auto_loop():
 
         try:
 
+            if active_trade and not active_trade.get("closed"):
+
+                check_active_trade()
+
+                time.sleep(15)
+
+                continue
+
             msg = build_signal()
 
             now = time.time()
@@ -562,11 +744,13 @@ def auto_loop():
 
                 last_signal_time = now
 
+            time.sleep(60)
+
         except Exception as e:
 
             print("Loop error:", e)
 
-        time.sleep(60)
+            time.sleep(15)
 
 
 # =========================================
@@ -581,7 +765,7 @@ def debug_api():
             "https://api.twelvedata.com/time_series",
             params={
                 "symbol": "XAU/USD",
-                "interval": "5min",
+                "interval": "1min",
                 "apikey": API_KEY,
                 "outputsize": 5
             }
@@ -664,6 +848,7 @@ Liquidity sweep ✔
 BOS / CHOCH ✔
 Rejection wick ✔
 ATR SL/TP ✔
+TP TRACKING ✔
 """)
 
                 elif text == "🔥 SCALP MODE":
@@ -671,7 +856,7 @@ ATR SL/TP ✔
                     tg("""
 🔥 SCALP MODE ACTIVE
 
-Smart Money scalp filters enabled.
+15 sec TP tracking enabled.
 """)
 
                 elif text == "🧪 DEBUG API":
