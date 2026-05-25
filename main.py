@@ -1,6 +1,5 @@
-import os, requests, datetime, math
-from flask import Flask, request, jsonify
-import threading, time
+import os, requests, datetime, threading, time
+from flask import Flask
 
 app = Flask(__name__)
 
@@ -17,32 +16,58 @@ last_signal_date = None
 last_signal_time = None
 
 def tg(msg):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": msg})
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json={"chat_id": CHAT_ID, "text": msg}
+    )
 
 def get_data(interval):
-    url = "https://api.twelvedata.com/time_series"
-    params = {
+    r = requests.get("https://api.twelvedata.com/time_series", params={
         "symbol": "XAU/USD",
         "interval": interval,
         "apikey": API_KEY,
-        "outputsize": 80
-    }
-    r = requests.get(url, params=params).json()
-    vals = r.get("values", [])
-    return list(reversed(vals))
+        "outputsize": 120
+    }).json()
+    return list(reversed(r.get("values", [])))
 
-def close_prices(data):
+def closes(data):
     return [float(x["close"]) for x in data]
 
+def ema(prices, period):
+    k = 2 / (period + 1)
+    e = prices[0]
+    for p in prices[1:]:
+        e = p * k + e * (1 - k)
+    return e
+
+def rsi(prices, period=14):
+    gains, losses = [], []
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        gains.append(max(diff, 0))
+        losses.append(abs(min(diff, 0)))
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
 def trend(prices):
-    if prices[-1] > prices[-5] > prices[-12]:
+    e20 = ema(prices[-60:], 20)
+    e50 = ema(prices[-80:], 50)
+    price = prices[-1]
+    if price > e20 > e50:
         return "bullish"
-    if prices[-1] < prices[-5] < prices[-12]:
+    if price < e20 < e50:
         return "bearish"
     return "neutral"
 
-def analyze():
+def in_session():
+    hour = datetime.datetime.utcnow().hour
+    return 7 <= hour <= 20
+
+def analyze(force=False):
     global signals_today, last_signal_date, last_signal_time
 
     today = datetime.date.today()
@@ -51,24 +76,29 @@ def analyze():
         last_signal_date = today
 
     if signals_today >= MAX_SIGNALS_PER_DAY:
+        if force:
+            tg("⛔ Max daily signals reached.")
         return
 
-    m1 = get_data("1min")
-    m5 = get_data("5min")
-    m15 = get_data("15min")
+    if not in_session():
+        if force:
+            tg("⏸ WAIT\nMarket outside preferred trading session.")
+        return
 
+    m1, m5, m15 = get_data("1min"), get_data("5min"), get_data("15min")
     if not m1 or not m5 or not m15:
+        if force:
+            tg("⚠️ Data error. No market data received.")
         return
 
-    p1 = close_prices(m1)
-    p5 = close_prices(m5)
-    p15 = close_prices(m15)
-
+    p1, p5, p15 = closes(m1), closes(m5), closes(m15)
     price = p1[-1]
-    t1, t5, t15 = trend(p1), trend(p5), trend(p15)
 
-    recent_high = max(p1[-20:])
-    recent_low = min(p1[-20:])
+    t1, t5, t15 = trend(p1), trend(p5), trend(p15)
+    rsi1, rsi5 = rsi(p1), rsi(p5)
+
+    recent_high = max(p1[-30:])
+    recent_low = min(p1[-30:])
     range_size = recent_high - recent_low
 
     buy_score = 0
@@ -82,13 +112,16 @@ def analyze():
     if t5 == "bearish": sell_score += 25
     if t1 == "bearish": sell_score += 15
 
-    if price > recent_high - 0.8 and t5 == "bullish":
-        buy_score += 15
+    if rsi1 < 35 and t5 != "bearish": buy_score += 15
+    if rsi1 > 65 and t5 != "bullish": sell_score += 15
 
-    if price < recent_low + 0.8 and t5 == "bearish":
-        sell_score += 15
+    if price > recent_high - 0.7 and rsi1 > 65:
+        sell_score += 10
 
-    if range_size > 3:
+    if price < recent_low + 0.7 and rsi1 < 35:
+        buy_score += 10
+
+    if range_size >= 3:
         buy_score += 5
         sell_score += 5
 
@@ -97,15 +130,32 @@ def analyze():
 
     if buy_score >= 70 and buy_score > sell_score:
         direction = "BUY"
-
-    if sell_score >= 70 and sell_score > buy_score:
+    elif sell_score >= 70 and sell_score > buy_score:
         direction = "SELL"
 
     if direction == "WAIT":
+        if force:
+            tg(f"""⏸ XAUUSD WAIT
+
+Price: {round(price, 2)}
+Buy score: {buy_score}%
+Sell score: {sell_score}%
+
+M1: {t1}
+M5: {t5}
+M15: {t15}
+
+RSI M1: {round(rsi1, 1)}
+RSI M5: {round(rsi5, 1)}
+
+Reason: No high probability setup.
+""")
         return
 
     now = time.time()
     if last_signal_time and now - last_signal_time < 1800:
+        if force:
+            tg("⏸ WAIT\nSignal cooldown active.")
         return
 
     risk_amount = ACCOUNT * (RISK_PERCENT / 100)
@@ -113,17 +163,16 @@ def analyze():
 
     if direction == "BUY":
         sl = round(price - 3.5, 2)
-        tp1 = round(price + 3.0, 2)
-        tp2 = round(price + 6.0, 2)
-        tp3 = round(price + 9.0, 2)
+        tp1 = round(price + 3, 2)
+        tp2 = round(price + 6, 2)
+        tp3 = round(price + 9, 2)
     else:
         sl = round(price + 3.5, 2)
-        tp1 = round(price - 3.0, 2)
-        tp2 = round(price - 6.0, 2)
-        tp3 = round(price - 9.0, 2)
+        tp1 = round(price - 3, 2)
+        tp2 = round(price - 6, 2)
+        tp3 = round(price - 9, 2)
 
-    msg = f"""
-📊 XAUUSD {direction} SIGNAL
+    tg(f"""📊 XAUUSD {direction} SIGNAL
 
 Entry: {round(price, 2)}
 SL: {sl}
@@ -136,21 +185,23 @@ Confidence: {confidence}%
 Lot: {lot}
 Risk: {risk_amount:.2f}€
 
-M1 trend: {t1}
-M5 trend: {t5}
-M15 trend: {t15}
+M1: {t1}
+M5: {t5}
+M15: {t15}
+
+RSI M1: {round(rsi1, 1)}
+RSI M5: {round(rsi5, 1)}
 
 Max daily signals: {MAX_SIGNALS_PER_DAY}
-"""
+""")
 
-    tg(msg)
     signals_today += 1
     last_signal_time = now
 
 def loop():
     while True:
         try:
-            analyze()
+            analyze(False)
         except Exception as e:
             print("ERROR:", e)
         time.sleep(60)
@@ -161,12 +212,12 @@ def home():
 
 @app.route("/test")
 def test():
-    tg("✅ TRADING FX BOT ONLINE\n\nLive AI Signal Engine aktiv.")
+    tg("✅ TRADING FX BOT ONLINE\n\nAdvanced AI Signal Engine aktiv.")
     return "Test sent."
 
 @app.route("/manual")
 def manual():
-    analyze()
+    analyze(True)
     return "Manual analysis started."
 
 if __name__ == "__main__":
