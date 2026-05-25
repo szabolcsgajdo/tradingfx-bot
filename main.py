@@ -3,7 +3,7 @@ import requests
 import datetime
 import threading
 import time
-from flask import Flask, request
+from flask import Flask
 
 app = Flask(__name__)
 
@@ -22,24 +22,22 @@ last_update_id = 0
 
 
 def tg(msg, keyboard=False):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": msg
-    }
+    payload = {"chat_id": CHAT_ID, "text": msg}
 
     if keyboard:
         payload["reply_markup"] = {
             "keyboard": [
-                ["📊 STATUS", "📈 ANALYZE"],
+                ["📊 STATUS", "📍 LIVE STATUS"],
                 ["📉 LAST SIGNAL", "⚠️ RISK"],
                 ["📋 STATS", "🔥 SCALP MODE"]
             ],
             "resize_keyboard": True
         }
 
-    requests.post(url, json=payload)
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json=payload
+    )
 
 
 def get_data(interval):
@@ -52,7 +50,6 @@ def get_data(interval):
             "outputsize": 80
         }
     ).json()
-
     return list(reversed(r.get("values", [])))
 
 
@@ -63,11 +60,80 @@ def close_prices(data):
 def trend(prices):
     if prices[-1] > prices[-5] > prices[-12]:
         return "bullish"
-
     if prices[-1] < prices[-5] < prices[-12]:
         return "bearish"
-
     return "neutral"
+
+
+def calculate_market_status():
+    m1 = get_data("1min")
+    m5 = get_data("5min")
+    m15 = get_data("15min")
+
+    if not m1 or not m5 or not m15:
+        return None
+
+    p1 = close_prices(m1)
+    p5 = close_prices(m5)
+    p15 = close_prices(m15)
+
+    price = p1[-1]
+    t1 = trend(p1)
+    t5 = trend(p5)
+    t15 = trend(p15)
+
+    buy_score = 0
+    sell_score = 0
+
+    if t15 == "bullish":
+        buy_score += 30
+    if t5 == "bullish":
+        buy_score += 25
+    if t1 == "bullish":
+        buy_score += 15
+
+    if t15 == "bearish":
+        sell_score += 30
+    if t5 == "bearish":
+        sell_score += 25
+    if t1 == "bearish":
+        sell_score += 15
+
+    total_score = buy_score + sell_score
+
+    if total_score == 0:
+        buy_percent = 50
+        sell_percent = 50
+    else:
+        buy_percent = round((buy_score / total_score) * 100)
+        sell_percent = 100 - buy_percent
+
+    if buy_percent > sell_percent:
+        bias = "BUY PRESSURE"
+        buy_text = "Better probability, but wait for pullback / confirmation."
+        sell_text = "Risky, currently weaker setup."
+    elif sell_percent > buy_percent:
+        bias = "SELL PRESSURE"
+        buy_text = "Risky, currently weaker setup."
+        sell_text = "Better probability, but wait for rejection / confirmation."
+    else:
+        bias = "NEUTRAL"
+        buy_text = "Wait. No clear edge."
+        sell_text = "Wait. No clear edge."
+
+    return {
+        "price": price,
+        "t1": t1,
+        "t5": t5,
+        "t15": t15,
+        "buy_score": buy_score,
+        "sell_score": sell_score,
+        "buy_percent": buy_percent,
+        "sell_percent": sell_percent,
+        "bias": bias,
+        "buy_text": buy_text,
+        "sell_text": sell_text
+    }
 
 
 def analyze(send_wait=True):
@@ -79,74 +145,40 @@ def analyze(send_wait=True):
         signals_today = 0
         last_signal_date = today
 
-    try:
-        m1 = get_data("1min")
-        m5 = get_data("5min")
-        m15 = get_data("15min")
+    status = calculate_market_status()
 
-        if not m1 or not m5 or not m15:
-            if send_wait:
-                tg("⚠️ Data error. No market data received.")
-            return
+    if not status:
+        if send_wait:
+            tg("⚠️ Data error. No market data received.")
+        return
 
-        p1 = close_prices(m1)
-        p5 = close_prices(m5)
-        p15 = close_prices(m15)
+    price = status["price"]
+    buy_percent = status["buy_percent"]
+    sell_percent = status["sell_percent"]
+    buy_score = status["buy_score"]
+    sell_score = status["sell_score"]
+    t1 = status["t1"]
+    t5 = status["t5"]
+    t15 = status["t15"]
 
-        price = p1[-1]
+    direction = "WAIT"
+    confidence = max(buy_percent, sell_percent)
 
-        t1 = trend(p1)
-        t5 = trend(p5)
-        t15 = trend(p15)
+    if buy_percent >= 70:
+        direction = "BUY"
+    elif sell_percent >= 70:
+        direction = "SELL"
 
-        buy_score = 0
-        sell_score = 0
+    risk_amount = ACCOUNT * (RISK_PERCENT / 100)
 
-        if t15 == "bullish":
-            buy_score += 30
-        if t5 == "bullish":
-            buy_score += 25
-        if t1 == "bullish":
-            buy_score += 15
-
-        if t15 == "bearish":
-            sell_score += 30
-        if t5 == "bearish":
-            sell_score += 25
-        if t1 == "bearish":
-            sell_score += 15
-
-        direction = "WAIT"
-        confidence = max(buy_score, sell_score)
-
-        if buy_score >= 70 and buy_score > sell_score:
-            direction = "BUY"
-
-        elif sell_score >= 70 and sell_score > buy_score:
-            direction = "SELL"
-
-        risk_amount = ACCOUNT * (RISK_PERCENT / 100)
-
-        if direction == "BUY":
-            sl = round(price - 3.5, 2)
-            tp1 = round(price + 3, 2)
-            tp2 = round(price + 6, 2)
-            tp3 = round(price + 9, 2)
-
-        elif direction == "SELL":
-            sl = round(price + 3.5, 2)
-            tp1 = round(price - 3, 2)
-            tp2 = round(price - 6, 2)
-            tp3 = round(price - 9, 2)
-
-        else:
-            msg = f"""
+    if direction == "WAIT":
+        msg = f"""
 ⏸ XAUUSD WAIT
 
 Price: {round(price, 2)}
 
-Buy score: {buy_score}%
-Sell score: {sell_score}%
+BUY chance: {buy_percent}%
+SELL chance: {sell_percent}%
 
 M1: {t1}
 M5: {t5}
@@ -154,14 +186,23 @@ M15: {t15}
 
 Reason: No high probability setup.
 """
-            last_signal = msg
+        last_signal = msg
+        if send_wait:
+            tg(msg)
+        return
 
-            if send_wait:
-                tg(msg)
+    if direction == "BUY":
+        sl = round(price - 3.5, 2)
+        tp1 = round(price + 3, 2)
+        tp2 = round(price + 6, 2)
+        tp3 = round(price + 9, 2)
+    else:
+        sl = round(price + 3.5, 2)
+        tp1 = round(price - 3, 2)
+        tp2 = round(price - 6, 2)
+        tp3 = round(price - 9, 2)
 
-            return
-
-        msg = f"""
+    msg = f"""
 📊 XAUUSD {direction} SIGNAL
 
 Entry: {round(price, 2)}
@@ -172,6 +213,9 @@ TP2: {tp2}
 TP3: {tp3}
 
 Confidence: {confidence}%
+BUY chance: {buy_percent}%
+SELL chance: {sell_percent}%
+
 Lot: 0.01
 Risk: {round(risk_amount, 2)}€
 
@@ -182,14 +226,56 @@ M15: {t15}
 Signals today: {signals_today}/{MAX_SIGNALS_PER_DAY}
 """
 
-        last_signal = msg
+    last_signal = msg
 
-        if signals_today < MAX_SIGNALS_PER_DAY:
-            tg(msg)
-            signals_today += 1
+    if signals_today < MAX_SIGNALS_PER_DAY:
+        tg(msg)
+        signals_today += 1
 
-    except Exception as e:
-        tg(f"⚠️ Error: {e}")
+
+def live_status():
+    status = calculate_market_status()
+
+    if not status:
+        tg("⚠️ Data error. No market data received.")
+        return
+
+    tg(f"""
+📍 LIVE MARKET STATUS
+
+XAUUSD current price:
+{round(status["price"], 2)}
+
+BUY chance:
+{status["buy_percent"]}%
+
+SELL chance:
+{status["sell_percent"]}%
+
+Bias:
+{status["bias"]}
+
+If BUY:
+{status["buy_text"]}
+
+If SELL:
+{status["sell_text"]}
+
+M1:
+{status["t1"]}
+
+M5:
+{status["t5"]}
+
+M15:
+{status["t15"]}
+
+Buy score:
+{status["buy_score"]}
+
+Sell score:
+{status["sell_score"]}
+""")
 
 
 def market_loop():
@@ -203,15 +289,13 @@ def telegram_polling():
 
     while True:
         try:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-            r = requests.get(url, params={
-                "offset": last_update_id + 1,
-                "timeout": 10
-            }).json()
+            r = requests.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+                params={"offset": last_update_id + 1, "timeout": 10}
+            ).json()
 
             for update in r.get("result", []):
                 last_update_id = update["update_id"]
-
                 message = update.get("message", {})
                 text = message.get("text", "")
 
@@ -229,15 +313,14 @@ Account: {ACCOUNT}€
 Risk: {RISK_PERCENT}%
 """)
 
-                elif text == "📈 ANALYZE":
-                    analyze(send_wait=True)
+                elif text == "📍 LIVE STATUS":
+                    live_status()
 
                 elif text == "📉 LAST SIGNAL":
                     tg(last_signal)
 
                 elif text == "⚠️ RISK":
                     risk_amount = ACCOUNT * (RISK_PERCENT / 100)
-
                     tg(f"""
 ⚠️ RISK MANAGEMENT
 
@@ -289,5 +372,4 @@ def manual():
 if __name__ == "__main__":
     threading.Thread(target=market_loop, daemon=True).start()
     threading.Thread(target=telegram_polling, daemon=True).start()
-
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
