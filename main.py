@@ -20,6 +20,7 @@ last_signal_date = None
 last_signal = "No signal yet."
 last_update_id = 0
 active_trade = None
+last_crash_alert_time = 0
 
 
 def tg(msg, keyboard=False):
@@ -65,6 +66,90 @@ def trend(prices):
     if prices[-1] < prices[-5] < prices[-12]:
         return "bearish"
     return "neutral"
+
+
+def candle_body(candle):
+    return abs(float(candle["close"]) - float(candle["open"]))
+
+
+def candle_direction(candle):
+    if float(candle["close"]) > float(candle["open"]):
+        return "bullish"
+    if float(candle["close"]) < float(candle["open"]):
+        return "bearish"
+    return "neutral"
+
+
+def detect_crash():
+    global last_crash_alert_time
+
+    now = time.time()
+
+    if now - last_crash_alert_time < 600:
+        return
+
+    m1 = get_data("1min")
+    m5 = get_data("5min")
+
+    if not m1 or not m5 or len(m1) < 20 or len(m5) < 10:
+        return
+
+    last_price = float(m1[-1]["close"])
+    last_5_m1 = m1[-5:]
+
+    bearish_count = sum(
+        1 for c in last_5_m1 if candle_direction(c) == "bearish"
+    )
+
+    bodies = [candle_body(c) for c in m1[-20:]]
+    avg_body = sum(bodies[:-1]) / max(len(bodies[:-1]), 1)
+    last_body = bodies[-1]
+
+    recent_low_m5 = min(float(c["low"]) for c in m5[-10:-1])
+    current_m5_close = float(m5[-1]["close"])
+
+    crash_score = 0
+    reasons = []
+
+    if bearish_count >= 4:
+        crash_score += 25
+        reasons.append("4/5 recent M1 candles bearish")
+
+    if avg_body > 0 and last_body > avg_body * 2:
+        crash_score += 25
+        reasons.append("large bearish M1 candle body")
+
+    if current_m5_close < recent_low_m5:
+        crash_score += 30
+        reasons.append("M5 structure break / recent low broken")
+
+    drop_5min = float(m1[-5]["close"]) - last_price
+
+    if drop_5min >= 3:
+        crash_score += 25
+        reasons.append(f"fast drop: {round(drop_5min, 2)} points in ~5 minutes")
+
+    if crash_score >= 70:
+        last_crash_alert_time = now
+
+        tg(f"""
+🚨 STRONG SELL MOMENTUM DETECTED
+
+XAUUSD current price:
+{round(last_price, 2)}
+
+Crash probability:
+{min(crash_score, 95)}%
+
+Reason:
+- {chr(10).join(reasons)}
+
+Action:
+SELL continuation possible.
+
+Risk:
+High volatility — use smaller lot and strict SL.
+""")
 
 
 def calculate_market_status():
@@ -426,13 +511,14 @@ Sell score:
 
 def market_loop():
     while True:
+        detect_crash()
         analyze(send_wait=False)
         check_trade_status()
         time.sleep(60)
 
 
 def telegram_polling():
-    global last_update_id, active_trade
+    global last_update_id
 
     while True:
         try:
