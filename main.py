@@ -3,16 +3,7 @@ import requests
 import datetime
 import threading
 import time
-
-from flask import Flask
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from flask import Flask, request
 
 app = Flask(__name__)
 
@@ -22,47 +13,47 @@ API_KEY = os.getenv("TWELVEDATA_API_KEY")
 
 ACCOUNT = float(os.getenv("ACCOUNT_BALANCE", 300))
 RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", 1))
-
 MAX_SIGNALS_PER_DAY = 3
 
 signals_today = 0
 last_signal_date = None
 last_signal = "No signal yet."
+last_update_id = 0
 
 
-# =========================
-# TELEGRAM SEND
-# =========================
-
-def tg(msg):
+def tg(msg, keyboard=False):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    requests.post(url, json={
+    payload = {
         "chat_id": CHAT_ID,
         "text": msg
-    })
-
-
-# =========================
-# MARKET DATA
-# =========================
-
-def get_data(interval):
-
-    url = "https://api.twelvedata.com/time_series"
-
-    params = {
-        "symbol": "XAU/USD",
-        "interval": interval,
-        "apikey": API_KEY,
-        "outputsize": 80
     }
 
-    r = requests.get(url, params=params).json()
+    if keyboard:
+        payload["reply_markup"] = {
+            "keyboard": [
+                ["📊 STATUS", "📈 ANALYZE"],
+                ["📉 LAST SIGNAL", "⚠️ RISK"],
+                ["📋 STATS", "🔥 SCALP MODE"]
+            ],
+            "resize_keyboard": True
+        }
 
-    vals = r.get("values", [])
+    requests.post(url, json=payload)
 
-    return list(reversed(vals))
+
+def get_data(interval):
+    r = requests.get(
+        "https://api.twelvedata.com/time_series",
+        params={
+            "symbol": "XAU/USD",
+            "interval": interval,
+            "apikey": API_KEY,
+            "outputsize": 80
+        }
+    ).json()
+
+    return list(reversed(r.get("values", [])))
 
 
 def close_prices(data):
@@ -70,7 +61,6 @@ def close_prices(data):
 
 
 def trend(prices):
-
     if prices[-1] > prices[-5] > prices[-12]:
         return "bullish"
 
@@ -80,15 +70,8 @@ def trend(prices):
     return "neutral"
 
 
-# =========================
-# ANALYZE
-# =========================
-
-def analyze():
-
-    global signals_today
-    global last_signal_date
-    global last_signal
+def analyze(send_wait=True):
+    global signals_today, last_signal_date, last_signal
 
     today = datetime.date.today()
 
@@ -96,16 +79,14 @@ def analyze():
         signals_today = 0
         last_signal_date = today
 
-    if signals_today >= MAX_SIGNALS_PER_DAY:
-        return
-
     try:
-
         m1 = get_data("1min")
         m5 = get_data("5min")
         m15 = get_data("15min")
 
         if not m1 or not m5 or not m15:
+            if send_wait:
+                tg("⚠️ Data error. No market data received.")
             return
 
         p1 = close_prices(m1)
@@ -123,34 +104,44 @@ def analyze():
 
         if t15 == "bullish":
             buy_score += 30
-
         if t5 == "bullish":
             buy_score += 25
-
         if t1 == "bullish":
             buy_score += 15
 
         if t15 == "bearish":
             sell_score += 30
-
         if t5 == "bearish":
             sell_score += 25
-
         if t1 == "bearish":
             sell_score += 15
 
         direction = "WAIT"
-
         confidence = max(buy_score, sell_score)
 
-        if buy_score >= 70:
+        if buy_score >= 70 and buy_score > sell_score:
             direction = "BUY"
 
-        if sell_score >= 70:
+        elif sell_score >= 70 and sell_score > buy_score:
             direction = "SELL"
 
-        msg = f"""
-📊 XAUUSD {direction}
+        risk_amount = ACCOUNT * (RISK_PERCENT / 100)
+
+        if direction == "BUY":
+            sl = round(price - 3.5, 2)
+            tp1 = round(price + 3, 2)
+            tp2 = round(price + 6, 2)
+            tp3 = round(price + 9, 2)
+
+        elif direction == "SELL":
+            sl = round(price + 3.5, 2)
+            tp1 = round(price - 3, 2)
+            tp2 = round(price - 6, 2)
+            tp3 = round(price - 9, 2)
+
+        else:
+            msg = f"""
+⏸ XAUUSD WAIT
 
 Price: {round(price, 2)}
 
@@ -161,159 +152,122 @@ M1: {t1}
 M5: {t5}
 M15: {t15}
 
+Reason: No high probability setup.
+"""
+            last_signal = msg
+
+            if send_wait:
+                tg(msg)
+
+            return
+
+        msg = f"""
+📊 XAUUSD {direction} SIGNAL
+
+Entry: {round(price, 2)}
+SL: {sl}
+
+TP1: {tp1}
+TP2: {tp2}
+TP3: {tp3}
+
 Confidence: {confidence}%
+Lot: 0.01
+Risk: {round(risk_amount, 2)}€
+
+M1: {t1}
+M5: {t5}
+M15: {t15}
+
+Signals today: {signals_today}/{MAX_SIGNALS_PER_DAY}
 """
 
         last_signal = msg
 
-        if direction != "WAIT":
+        if signals_today < MAX_SIGNALS_PER_DAY:
             tg(msg)
             signals_today += 1
 
     except Exception as e:
-        print("ERROR:", e)
+        tg(f"⚠️ Error: {e}")
 
 
-# =========================
-# AUTO LOOP
-# =========================
-
-def loop():
-
+def market_loop():
     while True:
-
-        try:
-            analyze()
-
-        except Exception as e:
-            print(e)
-
+        analyze(send_wait=False)
         time.sleep(60)
 
 
-# =========================
-# TELEGRAM BUTTON MENU
-# =========================
+def telegram_polling():
+    global last_update_id
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+            r = requests.get(url, params={
+                "offset": last_update_id + 1,
+                "timeout": 10
+            }).json()
 
-    keyboard = [
-        ["📊 STATUS", "📈 ANALYZE"],
-        ["📉 LAST SIGNAL", "⚠️ RISK"],
-        ["📋 STATS", "🔥 SCALP MODE"]
-    ]
+            for update in r.get("result", []):
+                last_update_id = update["update_id"]
 
-    reply_markup = ReplyKeyboardMarkup(
-        keyboard,
-        resize_keyboard=True
-    )
+                message = update.get("message", {})
+                text = message.get("text", "")
 
-    await update.message.reply_text(
-        "🤖 TRADING FX AI BOT ONLINE\n\nVálassz funkciót:",
-        reply_markup=reply_markup
-    )
+                if text == "/start":
+                    tg("🤖 TRADING FX AI BOT ONLINE\n\nVálassz funkciót:", keyboard=True)
 
-
-# =========================
-# BUTTON ACTIONS
-# =========================
-
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    text = update.message.text
-
-    if text == "📊 STATUS":
-
-        await update.message.reply_text(
-            f"""
+                elif text == "📊 STATUS":
+                    tg(f"""
 📊 BOT STATUS
 
+Bot: ONLINE ✅
 Signals today: {signals_today}/{MAX_SIGNALS_PER_DAY}
 
 Account: {ACCOUNT}€
 Risk: {RISK_PERCENT}%
+""")
 
-Bot status: ONLINE
-"""
-        )
+                elif text == "📈 ANALYZE":
+                    analyze(send_wait=True)
 
-    elif text == "📈 ANALYZE":
+                elif text == "📉 LAST SIGNAL":
+                    tg(last_signal)
 
-        analyze()
+                elif text == "⚠️ RISK":
+                    risk_amount = ACCOUNT * (RISK_PERCENT / 100)
 
-        await update.message.reply_text(
-            "📈 Live analysis started..."
-        )
-
-    elif text == "📉 LAST SIGNAL":
-
-        await update.message.reply_text(last_signal)
-
-    elif text == "⚠️ RISK":
-
-        risk_amount = ACCOUNT * (RISK_PERCENT / 100)
-
-        await update.message.reply_text(
-            f"""
+                    tg(f"""
 ⚠️ RISK MANAGEMENT
 
 Account: {ACCOUNT}€
 Risk per trade: {RISK_PERCENT}%
 
 Max risk:
-{risk_amount:.2f}€
-"""
-        )
+{round(risk_amount, 2)}€
+""")
 
-    elif text == "📋 STATS":
-
-        await update.message.reply_text(
-            f"""
+                elif text == "📋 STATS":
+                    tg(f"""
 📋 DAILY STATS
 
-Signals today:
-{signals_today}
+Signals today: {signals_today}
+Max daily: {MAX_SIGNALS_PER_DAY}
+""")
 
-Max daily:
-{MAX_SIGNALS_PER_DAY}
-"""
-        )
-
-    elif text == "🔥 SCALP MODE":
-
-        await update.message.reply_text(
-            """
+                elif text == "🔥 SCALP MODE":
+                    tg("""
 🔥 SCALP MODE
 
-Fast signals enabled.
-M1 + M5 aggressive entries active.
-"""
-        )
+M1 + M5 fast signal mode active.
+""")
 
+        except Exception as e:
+            print("Polling error:", e)
 
-# =========================
-# TELEGRAM START
-# =========================
+        time.sleep(2)
 
-def start_telegram():
-
-    app_bot = Application.builder().token(BOT_TOKEN).build()
-
-    app_bot.add_handler(CommandHandler("start", cmd_start))
-
-    app_bot.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            buttons
-        )
-    )
-
-    app_bot.run_polling()
-
-
-# =========================
-# FLASK ROUTES
-# =========================
 
 @app.route("/")
 def home():
@@ -322,29 +276,18 @@ def home():
 
 @app.route("/test")
 def test():
-
-    tg("✅ TRADING FX BOT ONLINE")
-
+    tg("✅ TRADING FX BOT ONLINE", keyboard=True)
     return "Test sent."
 
 
-# =========================
-# START
-# =========================
+@app.route("/manual")
+def manual():
+    analyze(send_wait=True)
+    return "Manual analysis started."
+
 
 if __name__ == "__main__":
+    threading.Thread(target=market_loop, daemon=True).start()
+    threading.Thread(target=telegram_polling, daemon=True).start()
 
-    threading.Thread(
-        target=loop,
-        daemon=True
-    ).start()
-
-    threading.Thread(
-        target=start_telegram,
-        daemon=True
-    ).start()
-
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080))
-    )
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
