@@ -1,4 +1,8 @@
-import os, requests, datetime, threading, time
+import os
+import requests
+import datetime
+import threading
+import time
 from flask import Flask
 
 app = Flask(__name__)
@@ -15,19 +19,30 @@ signals_today = 0
 last_signal_date = None
 last_signal_time = None
 
+last_signal = "No signals yet."
+wins = 0
+losses = 0
+
 def tg(msg):
     requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        json={"chat_id": CHAT_ID, "text": msg}
+        json={
+            "chat_id": CHAT_ID,
+            "text": msg
+        }
     )
 
 def get_data(interval):
-    r = requests.get("https://api.twelvedata.com/time_series", params={
-        "symbol": "XAU/USD",
-        "interval": interval,
-        "apikey": API_KEY,
-        "outputsize": 120
-    }).json()
+    r = requests.get(
+        "https://api.twelvedata.com/time_series",
+        params={
+            "symbol": "XAU/USD",
+            "interval": interval,
+            "apikey": API_KEY,
+            "outputsize": 120
+        }
+    ).json()
+
     return list(reversed(r.get("values", [])))
 
 def closes(data):
@@ -36,31 +51,43 @@ def closes(data):
 def ema(prices, period):
     k = 2 / (period + 1)
     e = prices[0]
+
     for p in prices[1:]:
         e = p * k + e * (1 - k)
+
     return e
 
 def rsi(prices, period=14):
-    gains, losses = [], []
+    gains = []
+    losses_local = []
+
     for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
+        diff = prices[i] - prices[i - 1]
+
         gains.append(max(diff, 0))
-        losses.append(abs(min(diff, 0)))
+        losses_local.append(abs(min(diff, 0)))
+
     avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+    avg_loss = sum(losses_local[-period:]) / period
+
     if avg_loss == 0:
         return 100
+
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 def trend(prices):
     e20 = ema(prices[-60:], 20)
     e50 = ema(prices[-80:], 50)
+
     price = prices[-1]
+
     if price > e20 > e50:
         return "bullish"
+
     if price < e20 < e50:
         return "bearish"
+
     return "neutral"
 
 def in_session():
@@ -68,9 +95,13 @@ def in_session():
     return 7 <= hour <= 20
 
 def analyze(force=False):
-    global signals_today, last_signal_date, last_signal_time
+    global signals_today
+    global last_signal_date
+    global last_signal_time
+    global last_signal
 
     today = datetime.date.today()
+
     if last_signal_date != today:
         signals_today = 0
         last_signal_date = today
@@ -85,35 +116,59 @@ def analyze(force=False):
             tg("⏸ WAIT\nMarket outside preferred trading session.")
         return
 
-    m1, m5, m15 = get_data("1min"), get_data("5min"), get_data("15min")
+    m1 = get_data("1min")
+    m5 = get_data("5min")
+    m15 = get_data("15min")
+
     if not m1 or not m5 or not m15:
         if force:
-            tg("⚠️ Data error. No market data received.")
+            tg("⚠️ Data error.")
         return
 
-    p1, p5, p15 = closes(m1), closes(m5), closes(m15)
+    p1 = closes(m1)
+    p5 = closes(m5)
+    p15 = closes(m15)
+
     price = p1[-1]
 
-    t1, t5, t15 = trend(p1), trend(p5), trend(p15)
-    rsi1, rsi5 = rsi(p1), rsi(p5)
+    t1 = trend(p1)
+    t5 = trend(p5)
+    t15 = trend(p15)
+
+    rsi1 = rsi(p1)
+    rsi5 = rsi(p5)
 
     recent_high = max(p1[-30:])
     recent_low = min(p1[-30:])
+
     range_size = recent_high - recent_low
 
     buy_score = 0
     sell_score = 0
 
-    if t15 == "bullish": buy_score += 25
-    if t5 == "bullish": buy_score += 25
-    if t1 == "bullish": buy_score += 15
+    if t15 == "bullish":
+        buy_score += 25
 
-    if t15 == "bearish": sell_score += 25
-    if t5 == "bearish": sell_score += 25
-    if t1 == "bearish": sell_score += 15
+    if t5 == "bullish":
+        buy_score += 25
 
-    if rsi1 < 35 and t5 != "bearish": buy_score += 15
-    if rsi1 > 65 and t5 != "bullish": sell_score += 15
+    if t1 == "bullish":
+        buy_score += 15
+
+    if t15 == "bearish":
+        sell_score += 25
+
+    if t5 == "bearish":
+        sell_score += 25
+
+    if t1 == "bearish":
+        sell_score += 15
+
+    if rsi1 < 35 and t5 != "bearish":
+        buy_score += 15
+
+    if rsi1 > 65 and t5 != "bullish":
+        sell_score += 15
 
     if price > recent_high - 0.7 and rsi1 > 65:
         sell_score += 10
@@ -130,14 +185,17 @@ def analyze(force=False):
 
     if buy_score >= 70 and buy_score > sell_score:
         direction = "BUY"
+
     elif sell_score >= 70 and sell_score > buy_score:
         direction = "SELL"
 
     if direction == "WAIT":
         if force:
-            tg(f"""⏸ XAUUSD WAIT
+            tg(f"""
+⏸ XAUUSD WAIT
 
 Price: {round(price, 2)}
+
 Buy score: {buy_score}%
 Sell score: {sell_score}%
 
@@ -145,20 +203,22 @@ M1: {t1}
 M5: {t5}
 M15: {t15}
 
-RSI M1: {round(rsi1, 1)}
-RSI M5: {round(rsi5, 1)}
+RSI M1: {round(rsi1,1)}
+RSI M5: {round(rsi5,1)}
 
 Reason: No high probability setup.
 """)
         return
 
     now = time.time()
+
     if last_signal_time and now - last_signal_time < 1800:
         if force:
-            tg("⏸ WAIT\nSignal cooldown active.")
+            tg("⏸ WAIT\nCooldown active.")
         return
 
     risk_amount = ACCOUNT * (RISK_PERCENT / 100)
+
     lot = 0.01
 
     if direction == "BUY":
@@ -166,15 +226,30 @@ Reason: No high probability setup.
         tp1 = round(price + 3, 2)
         tp2 = round(price + 6, 2)
         tp3 = round(price + 9, 2)
+
     else:
         sl = round(price + 3.5, 2)
         tp1 = round(price - 3, 2)
         tp2 = round(price - 6, 2)
         tp3 = round(price - 9, 2)
 
-    tg(f"""📊 XAUUSD {direction} SIGNAL
+    last_signal = f"""
+📊 XAUUSD {direction}
 
-Entry: {round(price, 2)}
+Entry: {round(price,2)}
+SL: {sl}
+
+TP1: {tp1}
+TP2: {tp2}
+TP3: {tp3}
+
+Confidence: {confidence}%
+"""
+
+    tg(f"""
+📊 XAUUSD {direction} SIGNAL
+
+Entry: {round(price,2)}
 SL: {sl}
 
 TP1: {tp1}
@@ -183,14 +258,15 @@ TP3: {tp3}
 
 Confidence: {confidence}%
 Lot: {lot}
-Risk: {risk_amount:.2f}€
+
+Risk: {round(risk_amount,2)}€
 
 M1: {t1}
 M5: {t5}
 M15: {t15}
 
-RSI M1: {round(rsi1, 1)}
-RSI M5: {round(rsi5, 1)}
+RSI M1: {round(rsi1,1)}
+RSI M5: {round(rsi5,1)}
 
 Max daily signals: {MAX_SIGNALS_PER_DAY}
 """)
@@ -204,6 +280,7 @@ def loop():
             analyze(False)
         except Exception as e:
             print("ERROR:", e)
+
         time.sleep(60)
 
 @app.route("/")
@@ -212,7 +289,12 @@ def home():
 
 @app.route("/test")
 def test():
-    tg("✅ TRADING FX BOT ONLINE\n\nAdvanced AI Signal Engine aktiv.")
+    tg("""
+✅ TRADING FX BOT ONLINE
+
+Advanced AI Signal Engine aktiv.
+""")
+
     return "Test sent."
 
 @app.route("/manual")
@@ -220,6 +302,81 @@ def manual():
     analyze(True)
     return "Manual analysis started."
 
+@app.route("/status")
+def status():
+    msg = f"""
+🤖 BOT STATUS
+
+Bot: ONLINE ✅
+
+Account: {ACCOUNT}€
+Risk: {RISK_PERCENT}%
+
+Signals today:
+{signals_today}/{MAX_SIGNALS_PER_DAY}
+
+System:
+✔ EMA Trend
+✔ RSI Filter
+✔ Multi TF
+✔ AI Score
+"""
+
+    tg(msg)
+    return "Status sent."
+
+@app.route("/lastsignal")
+def lastsignal():
+    tg(last_signal)
+    return "Last signal sent."
+
+@app.route("/stats")
+def stats():
+    total = wins + losses
+
+    wr = 0
+
+    if total > 0:
+        wr = round((wins / total) * 100, 1)
+
+    msg = f"""
+📈 BOT STATS
+
+Wins: {wins}
+Losses: {losses}
+
+Total trades: {total}
+
+Winrate: {wr}%
+"""
+
+    tg(msg)
+    return "Stats sent."
+
+@app.route("/risk")
+def risk():
+    risk_amount = ACCOUNT * (RISK_PERCENT / 100)
+
+    msg = f"""
+💰 RISK MANAGEMENT
+
+Account: {ACCOUNT}€
+
+Risk per trade:
+{RISK_PERCENT}%
+
+Max risk:
+{round(risk_amount,2)}€
+"""
+
+    tg(msg)
+
+    return "Risk sent."
+
 if __name__ == "__main__":
     threading.Thread(target=loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8080))
+    )
