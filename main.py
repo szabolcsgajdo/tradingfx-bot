@@ -23,16 +23,25 @@ active_trade = None
 last_crash_alert_time = 0
 
 
+# =========================
+# TELEGRAM SEND
+# =========================
+
 def tg(msg, keyboard=False):
-    payload = {"chat_id": CHAT_ID, "text": msg}
+
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": msg
+    }
 
     if keyboard:
+
         payload["reply_markup"] = {
             "keyboard": [
                 ["📊 STATUS", "📍 LIVE STATUS"],
                 ["🎯 REQUEST SIGNAL", "📉 LAST SIGNAL"],
                 ["⚠️ RISK", "📋 STATS"],
-                ["🔥 SCALP MODE"]
+                ["🔥 SCALP MODE", "🧪 DEBUG API"]
             ],
             "resize_keyboard": True
         }
@@ -43,7 +52,12 @@ def tg(msg, keyboard=False):
     )
 
 
+# =========================
+# MARKET DATA
+# =========================
+
 def get_data(interval):
+
     r = requests.get(
         "https://api.twelvedata.com/time_series",
         params={
@@ -62,14 +76,51 @@ def close_prices(data):
 
 
 def trend(prices):
+
     if prices[-1] > prices[-5] > prices[-12]:
         return "bullish"
+
     if prices[-1] < prices[-5] < prices[-12]:
         return "bearish"
+
     return "neutral"
 
 
+# =========================
+# DEBUG API
+# =========================
+
+def debug_api():
+
+    try:
+
+        r = requests.get(
+            "https://api.twelvedata.com/time_series",
+            params={
+                "symbol": "XAU/USD",
+                "interval": "1min",
+                "apikey": API_KEY,
+                "outputsize": 5
+            }
+        ).json()
+
+        tg(f"""
+🧪 DEBUG API RESPONSE
+
+{str(r)[:3500]}
+""")
+
+    except Exception as e:
+
+        tg(f"⚠️ DEBUG ERROR: {e}")
+
+
+# =========================
+# MARKET STATUS
+# =========================
+
 def calculate_market_status():
+
     m1 = get_data("1min")
     m5 = get_data("5min")
     m15 = get_data("15min")
@@ -82,6 +133,7 @@ def calculate_market_status():
     p15 = close_prices(m15)
 
     price = p1[-1]
+
     t1 = trend(p1)
     t5 = trend(p5)
     t15 = trend(p15)
@@ -91,15 +143,19 @@ def calculate_market_status():
 
     if t15 == "bullish":
         buy_score += 30
+
     if t5 == "bullish":
         buy_score += 25
+
     if t1 == "bullish":
         buy_score += 15
 
     if t15 == "bearish":
         sell_score += 30
+
     if t5 == "bearish":
         sell_score += 25
+
     if t1 == "bearish":
         sell_score += 15
 
@@ -108,30 +164,40 @@ def calculate_market_status():
     if total_score == 0:
         buy_percent = 50
         sell_percent = 50
+
     else:
         buy_percent = round((buy_score / total_score) * 100)
         sell_percent = 100 - buy_percent
 
     if buy_percent > sell_percent:
+
         bias = "BUY PRESSURE"
-        buy_text = "Better probability, but wait for pullback / confirmation."
-        sell_text = "Risky, currently weaker setup."
+
+        buy_text = "Better probability."
+
+        sell_text = "Risky sell."
+
     elif sell_percent > buy_percent:
+
         bias = "SELL PRESSURE"
-        buy_text = "Risky, currently weaker setup."
-        sell_text = "Better probability, but wait for rejection / confirmation."
+
+        buy_text = "Risky buy."
+
+        sell_text = "Better probability."
+
     else:
+
         bias = "NEUTRAL"
-        buy_text = "Wait. No clear edge."
-        sell_text = "Wait. No clear edge."
+
+        buy_text = "No clear edge."
+
+        sell_text = "No clear edge."
 
     return {
         "price": price,
         "t1": t1,
         "t5": t5,
         "t15": t15,
-        "buy_score": buy_score,
-        "sell_score": sell_score,
         "buy_percent": buy_percent,
         "sell_percent": sell_percent,
         "bias": bias,
@@ -140,155 +206,106 @@ def calculate_market_status():
     }
 
 
-def analyze(send_wait=True):
-    global signals_today, last_signal_date, last_signal, active_trade
+# =========================
+# LIVE STATUS
+# =========================
 
-    today = datetime.date.today()
-
-    if last_signal_date != today:
-        signals_today = 0
-        last_signal_date = today
+def live_status():
 
     status = calculate_market_status()
 
     if not status:
-        if send_wait:
-            tg("⚠️ Data error. No market data received.")
+
+        tg("⚠️ Data error. No market data received.")
+
         return
 
-    price = status["price"]
-    buy_percent = status["buy_percent"]
-    sell_percent = status["sell_percent"]
-    t1 = status["t1"]
-    t5 = status["t5"]
-    t15 = status["t15"]
+    tg(f"""
+📍 LIVE MARKET STATUS
 
-    direction = "WAIT"
-    confidence = max(buy_percent, sell_percent)
+XAUUSD:
+{round(status["price"], 2)}
 
-    if buy_percent >= 60:
-        direction = "BUY"
-    elif sell_percent >= 60:
-        direction = "SELL"
+BUY chance:
+{status["buy_percent"]}%
 
-    risk_amount = ACCOUNT * (RISK_PERCENT / 100)
+SELL chance:
+{status["sell_percent"]}%
 
-    if direction == "WAIT":
-        msg = f"""
-⏸ XAUUSD WAIT
+Bias:
+{status["bias"]}
 
-Price: {round(price, 2)}
+M1:
+{status["t1"]}
 
-BUY chance: {buy_percent}%
-SELL chance: {sell_percent}%
+M5:
+{status["t5"]}
 
-M1: {t1}
-M5: {t5}
-M15: {t15}
+M15:
+{status["t15"]}
 
-Reason: No high probability setup.
-"""
-        last_signal = msg
-        if send_wait:
-            tg(msg)
-        return
+BUY INFO:
+{status["buy_text"]}
 
-    if active_trade and not active_trade.get("closed"):
-        return
+SELL INFO:
+{status["sell_text"]}
+""")
 
-    if signals_today >= MAX_SIGNALS_PER_DAY:
-        return
 
-    if direction == "BUY":
-        sl = round(price - 3.5, 2)
-        tp1 = round(price + 3, 2)
-        tp2 = round(price + 6, 2)
-        tp3 = round(price + 9, 2)
-    else:
-        sl = round(price + 3.5, 2)
-        tp1 = round(price - 3, 2)
-        tp2 = round(price - 6, 2)
-        tp3 = round(price - 9, 2)
-
-    active_trade = {
-        "direction": direction,
-        "entry": round(price, 2),
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "tp1_hit": False,
-        "tp2_hit": False,
-        "tp3_hit": False,
-        "closed": False
-    }
-
-    msg = f"""
-📊 XAUUSD {direction} SIGNAL
-
-Entry: {round(price, 2)}
-SL: {sl}
-
-TP1: {tp1}
-TP2: {tp2}
-TP3: {tp3}
-
-Confidence: {confidence}%
-BUY chance: {buy_percent}%
-SELL chance: {sell_percent}%
-
-Lot: 0.01
-Risk: {round(risk_amount, 2)}€
-
-M1: {t1}
-M5: {t5}
-M15: {t15}
-
-Signals today: {signals_today}/{MAX_SIGNALS_PER_DAY}
-"""
-
-    last_signal = msg
-    tg(msg)
-    signals_today += 1
-
+# =========================
+# REQUEST SIGNAL
+# =========================
 
 def force_signal_request():
+
     status = calculate_market_status()
 
     if not status:
+
         tg("⚠️ Data error. No market data received.")
+
         return
 
     price = status["price"]
+
     buy_percent = status["buy_percent"]
     sell_percent = status["sell_percent"]
 
     if buy_percent > sell_percent:
+
         direction = "BUY"
+
         sl = round(price - 3.5, 2)
+
         tp1 = round(price + 3, 2)
         tp2 = round(price + 6, 2)
         tp3 = round(price + 9, 2)
+
     elif sell_percent > buy_percent:
+
         direction = "SELL"
+
         sl = round(price + 3.5, 2)
+
         tp1 = round(price - 3, 2)
         tp2 = round(price - 6, 2)
         tp3 = round(price - 9, 2)
+
     else:
+
         direction = "WAIT"
+
         sl = "-"
         tp1 = "-"
         tp2 = "-"
         tp3 = "-"
 
     confidence = max(buy_percent, sell_percent)
-    risk_amount = ACCOUNT * (RISK_PERCENT / 100)
 
     tg(f"""
 🎯 REQUESTED SIGNAL
 
-XAUUSD current price:
+Current price:
 {round(price, 2)}
 
 Direction:
@@ -299,9 +316,6 @@ BUY chance:
 
 SELL chance:
 {sell_percent}%
-
-Entry:
-{round(price, 2)}
 
 SL:
 {sl}
@@ -318,9 +332,6 @@ TP3:
 Confidence:
 {confidence}%
 
-Risk:
-{round(risk_amount, 2)}€
-
 M1:
 {status["t1"]}
 
@@ -329,187 +340,15 @@ M5:
 
 M15:
 {status["t15"]}
-
-Note:
-This is a requested signal, not automatic high-probability alert.
 """)
 
 
-def check_trade_status():
-    global active_trade
-
-    if not active_trade or active_trade.get("closed"):
-        return
-
-    data = get_data("1min")
-
-    if not data:
-        return
-
-    price = float(data[-1]["close"])
-    direction = active_trade["direction"]
-
-    if direction == "BUY":
-        if price <= active_trade["sl"]:
-            tg(f"""
-🛑 SL HIT
-
-XAUUSD BUY stopped out.
-
-Entry: {active_trade["entry"]}
-SL: {active_trade["sl"]}
-Current price: {round(price, 2)}
-""")
-            active_trade["closed"] = True
-            return
-
-        if price >= active_trade["tp1"] and not active_trade["tp1_hit"]:
-            tg(f"""
-✅ TP1 HIT
-
-XAUUSD BUY
-
-TP1: {active_trade["tp1"]}
-Current price: {round(price, 2)}
-""")
-            active_trade["tp1_hit"] = True
-
-        if price >= active_trade["tp2"] and not active_trade["tp2_hit"]:
-            tg(f"""
-✅ TP2 HIT
-
-XAUUSD BUY
-
-TP2: {active_trade["tp2"]}
-Current price: {round(price, 2)}
-""")
-            active_trade["tp2_hit"] = True
-
-        if price >= active_trade["tp3"] and not active_trade["tp3_hit"]:
-            tg(f"""
-🏆 TP3 HIT — TRADE COMPLETED
-
-XAUUSD BUY successful.
-
-Entry: {active_trade["entry"]}
-TP3: {active_trade["tp3"]}
-Current price: {round(price, 2)}
-""")
-            active_trade["tp3_hit"] = True
-            active_trade["closed"] = True
-
-    if direction == "SELL":
-        if price >= active_trade["sl"]:
-            tg(f"""
-🛑 SL HIT
-
-XAUUSD SELL stopped out.
-
-Entry: {active_trade["entry"]}
-SL: {active_trade["sl"]}
-Current price: {round(price, 2)}
-""")
-            active_trade["closed"] = True
-            return
-
-        if price <= active_trade["tp1"] and not active_trade["tp1_hit"]:
-            tg(f"""
-✅ TP1 HIT
-
-XAUUSD SELL
-
-TP1: {active_trade["tp1"]}
-Current price: {round(price, 2)}
-""")
-            active_trade["tp1_hit"] = True
-
-        if price <= active_trade["tp2"] and not active_trade["tp2_hit"]:
-            tg(f"""
-✅ TP2 HIT
-
-XAUUSD SELL
-
-TP2: {active_trade["tp2"]}
-Current price: {round(price, 2)}
-""")
-            active_trade["tp2_hit"] = True
-
-        if price <= active_trade["tp3"] and not active_trade["tp3_hit"]:
-            tg(f"""
-🏆 TP3 HIT — TRADE COMPLETED
-
-XAUUSD SELL successful.
-
-Entry: {active_trade["entry"]}
-TP3: {active_trade["tp3"]}
-Current price: {round(price, 2)}
-""")
-            active_trade["tp3_hit"] = True
-            active_trade["closed"] = True
-
-
-def live_status():
-    status = calculate_market_status()
-
-    if not status:
-        tg("⚠️ Data error. No market data received.")
-        return
-
-    trade_text = "No active trade."
-
-    if active_trade and not active_trade.get("closed"):
-        trade_text = f"""
-Active trade:
-{active_trade["direction"]}
-
-Entry: {active_trade["entry"]}
-SL: {active_trade["sl"]}
-TP1: {active_trade["tp1"]}
-TP2: {active_trade["tp2"]}
-TP3: {active_trade["tp3"]}
-"""
-
-    tg(f"""
-📍 LIVE MARKET STATUS
-
-XAUUSD current price:
-{round(status["price"], 2)}
-
-BUY chance:
-{status["buy_percent"]}%
-
-SELL chance:
-{status["sell_percent"]}%
-
-Bias:
-{status["bias"]}
-
-If BUY:
-{status["buy_text"]}
-
-If SELL:
-{status["sell_text"]}
-
-M1:
-{status["t1"]}
-
-M5:
-{status["t5"]}
-
-M15:
-{status["t15"]}
-
-Buy score:
-{status["buy_score"]}
-
-Sell score:
-{status["sell_score"]}
-
-{trade_text}
-""")
-
+# =========================
+# CRASH DETECTOR
+# =========================
 
 def crash_detector():
+
     global last_crash_alert_time
 
     now = time.time()
@@ -518,166 +357,212 @@ def crash_detector():
         return
 
     m1 = get_data("1min")
-    m5 = get_data("5min")
 
-    if not m1 or not m5:
+    if not m1:
         return
 
     p1 = close_prices(m1)
-    p5 = close_prices(m5)
 
     current_price = p1[-1]
+
     last5 = p1[-5:]
 
-    bearish_candles = 0
+    bearish = 0
 
     for i in range(1, len(last5)):
+
         if last5[i] < last5[i - 1]:
-            bearish_candles += 1
+            bearish += 1
 
     move_size = max(last5) - min(last5)
-    t5 = trend(p5)
 
-    crash_score = 0
+    score = 0
 
-    if bearish_candles >= 4:
-        crash_score += 35
+    if bearish >= 4:
+        score += 40
 
     if move_size >= 8:
-        crash_score += 35
-
-    if t5 == "bearish":
-        crash_score += 20
+        score += 40
 
     if move_size >= 12:
-        crash_score += 10
+        score += 20
 
-    if crash_score >= 70:
-        last_crash_alert_time = now
+    if score >= 70:
 
         tg(f"""
 🚨 STRONG SELL MOMENTUM DETECTED
 
-XAUUSD current price:
+Price:
 {round(current_price, 2)}
 
 Crash probability:
-{crash_score}%
+{score}%
 
-Reason:
-- Bearish acceleration
-- Strong M1 dump
-- Fast volatility spike
-- M5 bearish structure
-
-Action:
-SELL continuation possible
-
-Risk:
-⚠️ High volatility detected.
-Use smaller lot size.
+High volatility detected.
+SELL continuation possible.
 """)
 
+        last_crash_alert_time = now
+
+
+# =========================
+# LOOP
+# =========================
 
 def market_loop():
+
     while True:
-        analyze(send_wait=False)
-        check_trade_status()
-        crash_detector()
+
+        try:
+
+            crash_detector()
+
+        except Exception as e:
+
+            print("Loop error:", e)
+
         time.sleep(60)
 
 
+# =========================
+# TELEGRAM POLLING
+# =========================
+
 def telegram_polling():
+
     global last_update_id
 
     while True:
+
         try:
+
             r = requests.get(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-                params={"offset": last_update_id + 1, "timeout": 10}
+                params={
+                    "offset": last_update_id + 1,
+                    "timeout": 10
+                }
             ).json()
 
             for update in r.get("result", []):
+
                 last_update_id = update["update_id"]
+
                 message = update.get("message", {})
+
                 text = message.get("text", "")
 
                 if text == "/start":
-                    tg("🤖 TRADING FX AI BOT ONLINE\n\nVálassz funkciót:", keyboard=True)
+
+                    tg(
+                        "🤖 TRADING FX BOT ONLINE",
+                        keyboard=True
+                    )
 
                 elif text == "📊 STATUS":
+
                     tg(f"""
 📊 BOT STATUS
 
-Bot: ONLINE ✅
-Signals today: {signals_today}/{MAX_SIGNALS_PER_DAY}
+ONLINE ✅
 
-Account: {ACCOUNT}€
-Risk: {RISK_PERCENT}%
+Account:
+{ACCOUNT}€
+
+Risk:
+{RISK_PERCENT}%
 """)
 
                 elif text == "📍 LIVE STATUS":
+
                     live_status()
 
                 elif text == "🎯 REQUEST SIGNAL":
+
                     force_signal_request()
 
                 elif text == "📉 LAST SIGNAL":
+
                     tg(last_signal)
 
                 elif text == "⚠️ RISK":
-                    risk_amount = ACCOUNT * (RISK_PERCENT / 100)
 
                     tg(f"""
-⚠️ RISK MANAGEMENT
+⚠️ RISK
 
-Account: {ACCOUNT}€
-Risk per trade: {RISK_PERCENT}%
+Account:
+{ACCOUNT}€
 
-Max risk:
-{round(risk_amount, 2)}€
+Risk:
+{RISK_PERCENT}%
 """)
 
                 elif text == "📋 STATS":
-                    tg(f"""
-📋 DAILY STATS
 
-Signals today: {signals_today}
-Max daily: {MAX_SIGNALS_PER_DAY}
+                    tg(f"""
+📋 STATS
+
+Signals today:
+{signals_today}
 """)
 
                 elif text == "🔥 SCALP MODE":
-                    tg("""
-🔥 SCALP MODE
 
-M1 + M5 fast signal mode active.
-Crash detector enabled.
+                    tg("""
+🔥 SCALP MODE ACTIVE
+
+Fast M1 + M5 signals enabled.
 """)
 
+                elif text == "🧪 DEBUG API":
+
+                    debug_api()
+
         except Exception as e:
+
             print("Polling error:", e)
 
         time.sleep(2)
 
 
+# =========================
+# FLASK
+# =========================
+
 @app.route("/")
 def home():
+
     return "TRADING FX BOT ONLINE"
 
 
 @app.route("/test")
 def test():
-    tg("✅ TRADING FX BOT ONLINE", keyboard=True)
+
+    tg(
+        "✅ BOT ONLINE",
+        keyboard=True
+    )
+
     return "Test sent."
 
 
-@app.route("/manual")
-def manual():
-    analyze(send_wait=True)
-    return "Manual analysis started."
-
+# =========================
+# START
+# =========================
 
 if __name__ == "__main__":
-    threading.Thread(target=market_loop, daemon=True).start()
-    threading.Thread(target=telegram_polling, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+    threading.Thread(
+        target=market_loop,
+        daemon=True
+    ).start()
+
+    threading.Thread(
+        target=telegram_polling,
+        daemon=True
+    ).start()
+
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8080))
+    )
