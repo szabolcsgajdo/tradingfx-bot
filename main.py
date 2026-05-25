@@ -19,6 +19,7 @@ signals_today = 0
 last_signal_date = None
 last_signal = "No signal yet."
 last_update_id = 0
+active_trade = None
 
 
 def tg(msg, keyboard=False):
@@ -44,12 +45,13 @@ def get_data(interval):
     r = requests.get(
         "https://api.twelvedata.com/time_series",
         params={
-            "symbol": "XAU/USD",
+            "symbol": "XAUUSD",
             "interval": interval,
             "apikey": API_KEY,
             "outputsize": 80
         }
     ).json()
+
     return list(reversed(r.get("values", [])))
 
 
@@ -137,7 +139,7 @@ def calculate_market_status():
 
 
 def analyze(send_wait=True):
-    global signals_today, last_signal_date, last_signal
+    global signals_today, last_signal_date, last_signal, active_trade
 
     today = datetime.date.today()
 
@@ -155,8 +157,6 @@ def analyze(send_wait=True):
     price = status["price"]
     buy_percent = status["buy_percent"]
     sell_percent = status["sell_percent"]
-    buy_score = status["buy_score"]
-    sell_score = status["sell_score"]
     t1 = status["t1"]
     t5 = status["t5"]
     t15 = status["t15"]
@@ -191,6 +191,12 @@ Reason: No high probability setup.
             tg(msg)
         return
 
+    if active_trade and not active_trade.get("closed"):
+        return
+
+    if signals_today >= MAX_SIGNALS_PER_DAY:
+        return
+
     if direction == "BUY":
         sl = round(price - 3.5, 2)
         tp1 = round(price + 3, 2)
@@ -201,6 +207,19 @@ Reason: No high probability setup.
         tp1 = round(price - 3, 2)
         tp2 = round(price - 6, 2)
         tp3 = round(price - 9, 2)
+
+    active_trade = {
+        "direction": direction,
+        "entry": round(price, 2),
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "tp1_hit": False,
+        "tp2_hit": False,
+        "tp3_hit": False,
+        "closed": False
+    }
 
     msg = f"""
 📊 XAUUSD {direction} SIGNAL
@@ -227,10 +246,121 @@ Signals today: {signals_today}/{MAX_SIGNALS_PER_DAY}
 """
 
     last_signal = msg
+    tg(msg)
+    signals_today += 1
 
-    if signals_today < MAX_SIGNALS_PER_DAY:
-        tg(msg)
-        signals_today += 1
+
+def check_trade_status():
+    global active_trade
+
+    if not active_trade or active_trade.get("closed"):
+        return
+
+    data = get_data("1min")
+
+    if not data:
+        return
+
+    price = float(data[-1]["close"])
+    direction = active_trade["direction"]
+
+    if direction == "BUY":
+        if price <= active_trade["sl"]:
+            tg(f"""
+🛑 SL HIT
+
+XAUUSD BUY stopped out.
+
+Entry: {active_trade["entry"]}
+SL: {active_trade["sl"]}
+Current price: {round(price, 2)}
+""")
+            active_trade["closed"] = True
+            return
+
+        if price >= active_trade["tp1"] and not active_trade["tp1_hit"]:
+            tg(f"""
+✅ TP1 HIT
+
+XAUUSD BUY
+
+TP1: {active_trade["tp1"]}
+Current price: {round(price, 2)}
+""")
+            active_trade["tp1_hit"] = True
+
+        if price >= active_trade["tp2"] and not active_trade["tp2_hit"]:
+            tg(f"""
+✅ TP2 HIT
+
+XAUUSD BUY
+
+TP2: {active_trade["tp2"]}
+Current price: {round(price, 2)}
+""")
+            active_trade["tp2_hit"] = True
+
+        if price >= active_trade["tp3"] and not active_trade["tp3_hit"]:
+            tg(f"""
+🏆 TP3 HIT — TRADE COMPLETED
+
+XAUUSD BUY successful.
+
+Entry: {active_trade["entry"]}
+TP3: {active_trade["tp3"]}
+Current price: {round(price, 2)}
+""")
+            active_trade["tp3_hit"] = True
+            active_trade["closed"] = True
+
+    if direction == "SELL":
+        if price >= active_trade["sl"]:
+            tg(f"""
+🛑 SL HIT
+
+XAUUSD SELL stopped out.
+
+Entry: {active_trade["entry"]}
+SL: {active_trade["sl"]}
+Current price: {round(price, 2)}
+""")
+            active_trade["closed"] = True
+            return
+
+        if price <= active_trade["tp1"] and not active_trade["tp1_hit"]:
+            tg(f"""
+✅ TP1 HIT
+
+XAUUSD SELL
+
+TP1: {active_trade["tp1"]}
+Current price: {round(price, 2)}
+""")
+            active_trade["tp1_hit"] = True
+
+        if price <= active_trade["tp2"] and not active_trade["tp2_hit"]:
+            tg(f"""
+✅ TP2 HIT
+
+XAUUSD SELL
+
+TP2: {active_trade["tp2"]}
+Current price: {round(price, 2)}
+""")
+            active_trade["tp2_hit"] = True
+
+        if price <= active_trade["tp3"] and not active_trade["tp3_hit"]:
+            tg(f"""
+🏆 TP3 HIT — TRADE COMPLETED
+
+XAUUSD SELL successful.
+
+Entry: {active_trade["entry"]}
+TP3: {active_trade["tp3"]}
+Current price: {round(price, 2)}
+""")
+            active_trade["tp3_hit"] = True
+            active_trade["closed"] = True
 
 
 def live_status():
@@ -239,6 +369,20 @@ def live_status():
     if not status:
         tg("⚠️ Data error. No market data received.")
         return
+
+    trade_text = "No active trade."
+
+    if active_trade and not active_trade.get("closed"):
+        trade_text = f"""
+Active trade:
+{active_trade["direction"]}
+
+Entry: {active_trade["entry"]}
+SL: {active_trade["sl"]}
+TP1: {active_trade["tp1"]}
+TP2: {active_trade["tp2"]}
+TP3: {active_trade["tp3"]}
+"""
 
     tg(f"""
 📍 LIVE MARKET STATUS
@@ -275,17 +419,20 @@ Buy score:
 
 Sell score:
 {status["sell_score"]}
+
+{trade_text}
 """)
 
 
 def market_loop():
     while True:
         analyze(send_wait=False)
+        check_trade_status()
         time.sleep(60)
 
 
 def telegram_polling():
-    global last_update_id
+    global last_update_id, active_trade
 
     while True:
         try:
