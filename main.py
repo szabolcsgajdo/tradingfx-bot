@@ -1,7 +1,5 @@
-# =========================================
 # SMART MONEY AI ENGINE
-# WITH TP / SL TRACKING
-# =========================================
+# TP/SL TRACKING + BREAK EVEN + STATS
 
 import os
 import requests
@@ -26,23 +24,20 @@ last_signal_time = 0
 
 active_trade = None
 
+wins = 0
+losses = 0
+
 CACHE = {}
 CACHE_TIME = {}
 
 
-# =========================================
-# TELEGRAM
-# =========================================
-
 def tg(msg, keyboard=False):
-
     payload = {
         "chat_id": CHAT_ID,
         "text": msg
     }
 
     if keyboard:
-
         payload["reply_markup"] = {
             "keyboard": [
                 ["📊 STATUS", "📍 LIVE STATUS"],
@@ -59,12 +54,7 @@ def tg(msg, keyboard=False):
     )
 
 
-# =========================================
-# MARKET DATA
-# =========================================
-
 def get_data(interval, size=120):
-
     now = time.time()
 
     if interval in CACHE:
@@ -101,32 +91,20 @@ def lows(data):
     return [float(x["low"]) for x in data]
 
 
-# =========================================
-# EMA
-# =========================================
-
 def ema(prices, period):
-
     if len(prices) < period:
         return prices[-1]
 
     multiplier = 2 / (period + 1)
-
     ema_value = mean(prices[:period])
 
     for p in prices[period:]:
-
         ema_value = (p - ema_value) * multiplier + ema_value
 
     return ema_value
 
 
-# =========================================
-# RSI
-# =========================================
-
 def rsi(prices, period=14):
-
     if len(prices) < period + 1:
         return 50
 
@@ -134,12 +112,10 @@ def rsi(prices, period=14):
     losses = []
 
     for i in range(1, period + 1):
-
         diff = prices[-i] - prices[-i - 1]
 
         if diff >= 0:
             gains.append(diff)
-
         else:
             losses.append(abs(diff))
 
@@ -151,19 +127,13 @@ def rsi(prices, period=14):
     return round(100 - (100 / (1 + rs)), 2)
 
 
-# =========================================
-# ATR
-# =========================================
-
 def atr(data, period=14):
-
     if len(data) < period + 1:
         return 1
 
     trs = []
 
     for i in range(1, period + 1):
-
         high = float(data[-i]["high"])
         low = float(data[-i]["low"])
 
@@ -172,12 +142,7 @@ def atr(data, period=14):
     return round(mean(trs), 2)
 
 
-# =========================================
-# SESSION
-# =========================================
-
 def session_name():
-
     hour = datetime.datetime.utcnow().hour
 
     if 6 <= hour <= 11:
@@ -189,12 +154,7 @@ def session_name():
     return "ASIA"
 
 
-# =========================================
-# LIQUIDITY SWEEP
-# =========================================
-
 def liquidity_sweep(data):
-
     hs = highs(data)
     ls = lows(data)
     cs = closes(data)
@@ -218,12 +178,7 @@ def liquidity_sweep(data):
     return sweep_high, sweep_low
 
 
-# =========================================
-# BOS
-# =========================================
-
 def structure_break(data):
-
     hs = highs(data)
     ls = lows(data)
     cs = closes(data)
@@ -245,12 +200,7 @@ def structure_break(data):
     return bos_bull, bos_bear
 
 
-# =========================================
-# REJECTION WICK
-# =========================================
-
 def rejection_wick(data):
-
     candle = data[-1]
 
     openp = float(candle["open"])
@@ -269,12 +219,7 @@ def rejection_wick(data):
     return bullish_rejection, bearish_rejection
 
 
-# =========================================
-# MARKET STATUS
-# =========================================
-
 def calculate_market_status():
-
     m1 = get_data("1min")
     m5 = get_data("5min")
     m15 = get_data("15min")
@@ -290,7 +235,6 @@ def calculate_market_status():
 
     buy_score = 0
     sell_score = 0
-
     notes = []
 
     ema20_m5 = ema(p5, 20)
@@ -399,12 +343,7 @@ def calculate_market_status():
     }
 
 
-# =========================================
-# BUILD SIGNAL
-# =========================================
-
 def build_signal():
-
     global last_signal
     global active_trade
 
@@ -421,7 +360,6 @@ def build_signal():
     direction = "WAIT"
 
     if not status["no_trade"]:
-
         if buy >= 65 and buy > sell:
             direction = "BUY"
 
@@ -431,30 +369,24 @@ def build_signal():
     atr_value = status["atr"]
 
     if direction == "BUY":
-
         sl = round(price - (atr_value * 1.5), 2)
-
         tp1 = round(price + (atr_value * 1.5), 2)
         tp2 = round(price + (atr_value * 3), 2)
         tp3 = round(price + (atr_value * 4.5), 2)
 
     elif direction == "SELL":
-
         sl = round(price + (atr_value * 1.5), 2)
-
         tp1 = round(price - (atr_value * 1.5), 2)
         tp2 = round(price - (atr_value * 3), 2)
         tp3 = round(price - (atr_value * 4.5), 2)
 
     else:
-
         sl = "-"
         tp1 = "-"
         tp2 = "-"
         tp3 = "-"
 
     if direction in ["BUY", "SELL"]:
-
         active_trade = {
             "direction": direction,
             "entry": round(price, 2),
@@ -465,10 +397,12 @@ def build_signal():
             "tp1_hit": False,
             "tp2_hit": False,
             "tp3_hit": False,
-            "closed": False
+            "closed": False,
+            "break_even_set": False,
+            "trailing_active": False
         }
 
-    note_text = "\n- ".join(status["notes"])
+    note_text = "\n- ".join(status["notes"]) if status["notes"] else "No special warning."
 
     msg = f"""
 🎯 SMART MONEY AI SIGNAL
@@ -518,13 +452,10 @@ Notes:
     return msg
 
 
-# =========================================
-# TP / SL TRACKER
-# =========================================
-
 def check_active_trade():
-
     global active_trade
+    global wins
+    global losses
 
     if not active_trade:
         return
@@ -538,12 +469,11 @@ def check_active_trade():
         return
 
     price = float(data[-1]["close"])
-
     direction = active_trade["direction"]
 
     if direction == "BUY":
-
         if price <= active_trade["sl"]:
+            losses += 1
 
             tg(f"""
 🛑 SL HIT
@@ -563,10 +493,12 @@ Current:
             active_trade["closed"] = True
             return
 
-        if (
-            price >= active_trade["tp1"]
-            and not active_trade["tp1_hit"]
-        ):
+        if price >= active_trade["tp1"] and not active_trade["tp1_hit"]:
+            active_trade["tp1_hit"] = True
+
+            active_trade["sl"] = active_trade["entry"]
+            active_trade["break_even_set"] = True
+            active_trade["trailing_active"] = True
 
             tg(f"""
 ✅ TP1 HIT
@@ -578,14 +510,15 @@ TP1:
 
 Current:
 {round(price, 2)}
+
+🟢 BREAK EVEN SET
+
+New SL:
+{active_trade["sl"]}
 """)
 
-            active_trade["tp1_hit"] = True
-
-        if (
-            price >= active_trade["tp2"]
-            and not active_trade["tp2_hit"]
-        ):
+        if price >= active_trade["tp2"] and not active_trade["tp2_hit"]:
+            active_trade["tp2_hit"] = True
 
             tg(f"""
 ✅ TP2 HIT
@@ -599,12 +532,8 @@ Current:
 {round(price, 2)}
 """)
 
-            active_trade["tp2_hit"] = True
-
-        if (
-            price >= active_trade["tp3"]
-            and not active_trade["tp3_hit"]
-        ):
+        if price >= active_trade["tp3"] and not active_trade["tp3_hit"]:
+            wins += 1
 
             tg(f"""
 🏆 TP3 HIT
@@ -622,8 +551,8 @@ Current:
             active_trade["closed"] = True
 
     elif direction == "SELL":
-
         if price >= active_trade["sl"]:
+            losses += 1
 
             tg(f"""
 🛑 SL HIT
@@ -643,10 +572,12 @@ Current:
             active_trade["closed"] = True
             return
 
-        if (
-            price <= active_trade["tp1"]
-            and not active_trade["tp1_hit"]
-        ):
+        if price <= active_trade["tp1"] and not active_trade["tp1_hit"]:
+            active_trade["tp1_hit"] = True
+
+            active_trade["sl"] = active_trade["entry"]
+            active_trade["break_even_set"] = True
+            active_trade["trailing_active"] = True
 
             tg(f"""
 ✅ TP1 HIT
@@ -658,14 +589,15 @@ TP1:
 
 Current:
 {round(price, 2)}
+
+🟢 BREAK EVEN SET
+
+New SL:
+{active_trade["sl"]}
 """)
 
-            active_trade["tp1_hit"] = True
-
-        if (
-            price <= active_trade["tp2"]
-            and not active_trade["tp2_hit"]
-        ):
+        if price <= active_trade["tp2"] and not active_trade["tp2_hit"]:
+            active_trade["tp2_hit"] = True
 
             tg(f"""
 ✅ TP2 HIT
@@ -679,12 +611,8 @@ Current:
 {round(price, 2)}
 """)
 
-            active_trade["tp2_hit"] = True
-
-        if (
-            price <= active_trade["tp3"]
-            and not active_trade["tp3_hit"]
-        ):
+        if price <= active_trade["tp3"] and not active_trade["tp3_hit"]:
+            wins += 1
 
             tg(f"""
 🏆 TP3 HIT
@@ -702,94 +630,77 @@ Current:
             active_trade["closed"] = True
 
 
-# =========================================
-# LIVE STATUS
-# =========================================
-
 def live_status():
-
     tg(build_signal())
 
 
-# =========================================
-# AUTO LOOP
-# =========================================
+def debug_api():
+    try:
+        results = {}
+
+        for interval in ["1min", "5min", "15min"]:
+            r = requests.get(
+                "https://api.twelvedata.com/time_series",
+                params={
+                    "symbol": "XAU/USD",
+                    "interval": interval,
+                    "apikey": API_KEY,
+                    "outputsize": 5
+                }
+            ).json()
+
+            results[interval] = str(r)[:1000]
+
+        tg(f"""
+🧪 DEBUG API RESPONSE
+
+1MIN:
+{results["1min"]}
+
+5MIN:
+{results["5min"]}
+
+15MIN:
+{results["15min"]}
+""")
+
+    except Exception as e:
+        tg(f"DEBUG ERROR: {e}")
+
 
 def auto_loop():
-
     global last_signal_time
 
     while True:
-
         try:
-
             if active_trade and not active_trade.get("closed"):
-
                 check_active_trade()
-
                 time.sleep(15)
-
                 continue
 
             msg = build_signal()
 
-            now = time.time()
+            if "Direction:\nBUY" in msg or "Direction:\nSELL" in msg:
+                now = time.time()
 
-            if (
-                ("Direction:\nBUY" in msg or "Direction:\nSELL" in msg)
-                and now - last_signal_time > 900
-            ):
-
-                tg(msg)
-
-                last_signal_time = now
+                if now - last_signal_time > 900:
+                    tg(msg)
+                    last_signal_time = now
 
             time.sleep(60)
 
         except Exception as e:
-
-            print("Loop error:", e)
-
+            print("Auto loop error:", e)
             time.sleep(15)
 
 
-# =========================================
-# DEBUG API
-# =========================================
-
-def debug_api():
-
-    try:
-
-        r = requests.get(
-            "https://api.twelvedata.com/time_series",
-            params={
-                "symbol": "XAU/USD",
-                "interval": "1min",
-                "apikey": API_KEY,
-                "outputsize": 5
-            }
-        ).json()
-
-        tg(str(r)[:3500])
-
-    except Exception as e:
-
-        tg(f"DEBUG ERROR: {e}")
-
-
-# =========================================
-# TELEGRAM
-# =========================================
-
 def telegram_polling():
-
     global last_update_id
+    global wins
+    global losses
 
     while True:
-
         try:
-
             r = requests.get(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
                 params={
@@ -799,36 +710,25 @@ def telegram_polling():
             ).json()
 
             for update in r.get("result", []):
-
                 last_update_id = update["update_id"]
-
                 text = update.get("message", {}).get("text", "")
 
                 if text == "/start":
-
-                    tg(
-                        "🤖 SMART MONEY AI ONLINE",
-                        keyboard=True
-                    )
+                    tg("🤖 SMART MONEY AI ONLINE", keyboard=True)
 
                 elif text == "📊 STATUS":
-
                     tg("✅ SMART MONEY ENGINE ONLINE")
 
                 elif text == "📍 LIVE STATUS":
-
                     live_status()
 
                 elif text == "🎯 REQUEST SIGNAL":
-
                     tg(build_signal())
 
                 elif text == "📉 LAST SIGNAL":
-
                     tg(last_signal)
 
                 elif text == "⚠️ RISK":
-
                     tg(f"""
 ⚠️ RISK
 
@@ -837,66 +737,63 @@ Account:
 
 Risk:
 {RISK_PERCENT}%
+
+Max risk:
+{round(ACCOUNT * (RISK_PERCENT / 100), 2)}€
 """)
 
                 elif text == "📋 STATS":
+                    total = wins + losses
+                    winrate = 0
 
-                    tg("""
-📋 SMART MONEY ENGINE ACTIVE
+                    if total > 0:
+                        winrate = round((wins / total) * 100, 1)
 
-Liquidity sweep ✔
-BOS / CHOCH ✔
-Rejection wick ✔
-ATR SL/TP ✔
-TP TRACKING ✔
+                    tg(f"""
+📋 BOT STATS
+
+Wins:
+{wins}
+
+Losses:
+{losses}
+
+Total trades:
+{total}
+
+Winrate:
+{winrate}%
 """)
 
                 elif text == "🔥 SCALP MODE":
-
                     tg("""
 🔥 SCALP MODE ACTIVE
 
 15 sec TP tracking enabled.
+Break even after TP1 enabled.
 """)
 
                 elif text == "🧪 DEBUG API":
-
                     debug_api()
 
         except Exception as e:
-
             print("Polling error:", e)
 
         time.sleep(2)
 
 
-# =========================================
-# FLASK
-# =========================================
-
 @app.route("/")
 def home():
-
     return "SMART MONEY AI ONLINE"
 
 
 @app.route("/test")
 def test():
-
-    tg(
-        "✅ SMART MONEY AI ONLINE",
-        keyboard=True
-    )
-
+    tg("✅ SMART MONEY AI ONLINE", keyboard=True)
     return "ok"
 
 
-# =========================================
-# START
-# =========================================
-
 if __name__ == "__main__":
-
     threading.Thread(
         target=auto_loop,
         daemon=True
