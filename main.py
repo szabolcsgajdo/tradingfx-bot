@@ -15,6 +15,7 @@ CHART_URL = os.getenv("CHART_URL")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 def send_telegram(msg):
+
     requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         json={
@@ -27,22 +28,45 @@ def capture_chart():
 
     with sync_playwright() as p:
 
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu"
+            ]
+        )
 
-        page = browser.new_page(viewport={"width": 1600, "height": 900})
+        page = browser.new_page(
+            viewport={
+                "width": 1600,
+                "height": 900
+            }
+        )
 
-        page.goto(CHART_URL)
+        page.goto(
+            CHART_URL,
+            wait_until="domcontentloaded",
+            timeout=90000
+        )
 
-        page.wait_for_timeout(10000)
+        # várjuk hogy teljesen betöltődjön
+        page.wait_for_timeout(25000)
 
-        page.screenshot(path="chart.png")
+        # screenshot készítés
+        page.screenshot(
+            path="chart.png",
+            full_page=False
+        )
 
         browser.close()
 
 def analyze_chart():
 
     with open("chart.png", "rb") as image_file:
-        image_base64 = base64.b64encode(image_file.read()).decode("utf-8")
+        image_base64 = base64.b64encode(
+            image_file.read()
+        ).decode("utf-8")
 
     response = client.chat.completions.create(
         model="gpt-4.1-mini",
@@ -50,30 +74,28 @@ def analyze_chart():
             {
                 "role": "system",
                 "content": """
-You are a professional Smart Money Concept and ICT trader.
+You are a professional ICT and Smart Money trader.
 
-Analyze the chart image.
+Analyze this XAUUSD chart.
 
 Look for:
-- trend
+- trend direction
 - liquidity sweep
 - BOS
 - CHOCH
 - order block
 - fair value gap
-- rejection candles
 - candlestick patterns
+- rejection wick
 - compression
+- breakout
+- fake breakout
 - accumulation/distribution
 - momentum
-- breakout or fake breakout
 
-Decide:
-BUY / SELL / WAIT
+Return only strong setups.
 
-Only give strong signals.
-
-Return response exactly in this format:
+Answer EXACTLY in this format:
 
 SIGNAL: BUY or SELL or WAIT
 CONFIDENCE: %
@@ -90,7 +112,7 @@ REASON:
                 "content": [
                     {
                         "type": "text",
-                        "text": "Analyze this XAUUSD chart."
+                        "text": "Analyze this TradingView XAUUSD chart."
                     },
                     {
                         "type": "image_url",
